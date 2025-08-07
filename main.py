@@ -1,13 +1,12 @@
-from cap.lmp.lmp import LMP
 from cap.lmp.utils import load_config
+from cap.lmp.lmp_wrapper import setup_LMP
 
+# Setup
 config = load_config('cap/config/real_config.yaml')
+lmp_tabletop_ui, lmp_env = setup_LMP(config)
 
-lmp_config = config["lmp_config"]['lmps']["writer"]
+# Add objects (replace with actual computer vision)
+lmp_env.update_object_list(['red block', 'blue bowl'])
 
-writer_lmp = LMP("writer_lmp", lmp_config, 
-                 fixed_vars={}, 
-                 variable_vars={}, 
-                 debug=True, env='real')
-
-print(writer_lmp("Write a function to calculate the factorial of a number."))
+# Execute commands
+lmp_tabletop_ui("put the red block on the blue bowl", f'objects = {lmp_env.get_obj_names()}')
