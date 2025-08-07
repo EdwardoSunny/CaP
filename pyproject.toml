@@ -8,6 +8,7 @@ dependencies = [
     "astunparse>=1.6.3",
     "atomics>=1.0.3",
     "av>=15.0.0",
+    "click>=8.2.1",
     "numpy>=2.2.6",
     "openai>=1.99.1",
     "opencv-python>=4.11.0.86",

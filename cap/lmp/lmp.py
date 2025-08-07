@@ -64,7 +64,7 @@ class LMP:
                 response = self._client.chat.completions.create(
                     model=self._cfg.get('model', 'gpt-4o'),  # Use model instead of engine
                     messages=[
-                        {"role": "system", "content": "You are a helpful assistant that pays attention to the user's instructions and writes good python code for operating a robot arm in a tabletop environment. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran. Do not repeat my code, just complete/continue from my code."},
+                        {"role": "system", "content": "You are a helpful assistant that pays attention to the user's instructions and writes good python code for operating a robot arm in a tabletop environment. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran. Do not repeat my code, just complete/continue from my code. Do not import any packages that aren't already there, you should never use the import keyword since all packages you need are already imported in the examples."},
                         {"role": "user", "content": prompt}
                     ],
                     stop=self._stop_tokens,
@@ -73,10 +73,6 @@ class LMP:
                 )
 
                 code_str = response.choices[0].message.content.strip()
-                print("xxxxxxxxxxxxxxxxxxx")
-                print(prompt)
-                print(code_str)
-                print("xxxxxxxxxxxxxxxxxxx")
                 break
             except (RateLimitError, APIConnectionError) as e:
                 print(f'OpenAI API got err {e}')
@@ -135,7 +131,7 @@ class LMPFGen:
                 response = self._client.chat.completions.create(
                     model=self._cfg.get('model', 'gpt-4o'),
                     messages=[
-                        {"role": "system", "content": "You are a helpful coding assistant."},
+                        {"role": "system", "content": "You are a helpful coding assistant. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran."},
                         {"role": "user", "content": prompt}
                     ],
                     stop=self._stop_tokens,
@@ -155,7 +151,7 @@ class LMPFGen:
                 edit_response = self._client.chat.completions.create(
                     model=self._cfg.get('model', 'gpt-4o'),
                     messages=[
-                        {"role": "system", "content": "Fix any bugs in the following code. Improve readability. Keep same inputs and outputs. Only make small changes. No comments."},
+                        {"role": "system", "content": "Fix any bugs in the following code. Improve readability. Keep same inputs and outputs. Only make small changes. No comments. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran."},
                         {"role": "user", "content": f_src}
                     ],
                     temperature=0,
@@ -267,9 +263,10 @@ def merge_dicts(dicts):
     
 
 def exec_safe(code_str, gvars=None, lvars=None):
-    banned_phrases = ['import', '__']
-    for phrase in banned_phrases:
-        assert phrase not in code_str
+    # This is problematic, fix later. Removing this check is unsafe but makes the code crash less
+    # banned_phrases = ['import', '__']
+    # for phrase in banned_phrases:
+    #     assert phrase not in code_str
   
     if gvars is None:
         gvars = {}

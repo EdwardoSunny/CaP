@@ -5,11 +5,9 @@ import logging
 from typing import List, Optional, Union, Tuple
 import shapely
 from cap.lmp.lmp import LMP, LMPFGen
-
 from ril_env.precise_sleep import precise_wait
 from ril_env.xarm_controller import XArmConfig, XArm
 from ril_env.real_env import RealEnv
-from multiprocessing.managers import SharedMemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -31,15 +29,15 @@ class LMPWrapper:
         self._dt = 1.0 / frequency
         self._current_grasp = 0.0
 
-        
         # Get initial robot state - same as teleop script
-        # state = self.env.get_robot_state()
-        # self._current_pose = np.array(state["TCPPose"], dtype=np.float32)
+        state = self.env.get_robot_state()
+
+        self._current_pose = np.array(state["TCPPose"], dtype=np.float32)
         
         # LMP-specific additions
         self._setup_lmp_environment()
         
-        # logger.info(f"Robot Primitives initialized. Current pose: {self._current_pose}")
+        logger.info(f"Robot Primitives initialized. Current pose: {self._current_pose}")
     
     def _setup_lmp_environment(self):
         """Setup LMP-specific environment variables and object tracking."""
@@ -167,11 +165,12 @@ class LMPWrapper:
             stage_val=stage_val
         )
     
-    def move_up(self, distance=0.05, duration=1.0, stage_val=0):
+    # def move_up(self, distance=0.05, duration=1.0, stage_val=0):
+    def move_up(self, distance=2.00, duration=1.0, stage_val=0):
         """Move robot up by specified distance."""
         return self.move_relative([0, 0, distance], duration=duration, stage_val=stage_val)
     
-    def move_down(self, distance=0.05, duration=1.0, stage_val=0):
+    def move_down(self, distance=2.00, duration=1.0, stage_val=0):
         """Move robot down by specified distance."""
         return self.move_relative([0, 0, -distance], duration=duration, stage_val=stage_val)
     
@@ -537,6 +536,8 @@ class LMPWrapper:
     
     def _move_to_pose(self, target_position, target_orientation, duration=3.0, stage_val=0):
         """Internal move to pose function using teleop script logic."""
+
+        print("MOVING TO", target_position)
         try:
             target_pose = np.array(target_position + target_orientation, dtype=np.float32)
             
@@ -658,7 +659,7 @@ class LMPWrapper:
             if wait_time > 0:
                 time.sleep(wait_time)
 
-def setup_LMP(config):
+def setup_LMP(config, env, xarm_config):
     """
     Setup LMP system for real robot environment using enhanced LMPWrapper.
     
@@ -668,29 +669,6 @@ def setup_LMP(config):
     Returns:
         tuple: (lmp_tabletop_ui, LMP_env) - The main LMP interface and environment wrapper
     """
-    
-    xarm_config = XArmConfig()
-    shm_manager = SharedMemoryManager()
-    # env = RealEnv(
-    #     output_dir="./recordings",
-    #     xarm_config=xarm_config,
-    #     frequency=30,
-    #     num_obs_steps=2,
-    #     obs_image_resolution=(1280, 720),
-    #     max_obs_buffer_size=30,
-    #     obs_float32=True,
-    #     init_joints=True,
-    #     video_capture_fps=30,
-    #     video_capture_resolution=(1280, 720),
-    #     record_raw_video=True,
-    #     thread_per_video=3,
-    #     video_crf=21,
-    #     enable_multi_cam_vis=False,
-    #     multi_cam_vis_resolution=(1280, 720),
-    #     shm_manager=shm_manager,
-    # )
-
-    env = None
 
     LMP_env = LMPWrapper(env, xarm_config)
     
@@ -760,6 +738,10 @@ def setup_LMP(config):
     })
 
     # Creating the LMP that deals with high-level language commands
+
+    print(fixed_vars)
+    print("========================================")
+    print(variable_vars)
 
     lmp_tabletop_ui = LMP(
         'tabletop_ui', 

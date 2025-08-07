@@ -5,15 +5,25 @@ import numpy as np
 import scipy.spatial.transform as st
 import logging
 import pathlib
-from cap.lmp.utils import load_config
-from cap.lmp.lmp_wrapper import setup_LMP
+
 from multiprocessing.managers import SharedMemoryManager
+
 from ril_env.precise_sleep import precise_wait
 from ril_env.xarm_controller import XArmConfig, XArm
 from ril_env.real_env import RealEnv
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+"""
+TODO:
+- Actually check that we are recording things
+- Fix the camera visualization
+- Fix the spacemouse-robot weird movement problem
+- Clean up the code, add some documentation
+- Demonstrations!
+"""
+
 
 def main(
     output="./recordings/",
@@ -51,17 +61,17 @@ def main(
                 logger.info("Configuring camera settings...")
                 env.realsense.set_exposure(exposure=120, gain=0)
                 env.realsense.set_white_balance(white_balance=5900)
+
                 time.sleep(1)
                 logger.info("System initialized")
 
-                config = load_config('cap/config/real_config.yaml')
-                lmp_tabletop_ui, lmp_env = setup_LMP(config, env, xarm_config)
-                # lmp_env.close_gripper()
-                # time.sleep(1)
-                # lmp_env.open_gripper()
+                state = env.get_robot_state()
 
-                lmp_env.update_object_list(['red block', 'blue bowl'])
-                lmp_tabletop_ui("Move up by 20 cm and close the gripper, wait 1 second, then open it again, then move back down", f'objects = {lmp_env.get_obj_names()}')
+                print(state)
+                target_pose = np.array(state["TCPPose"], dtype=np.float32)
+                logger.info(f"Initial pose: {target_pose}")
+
+                exit()
 
 if __name__ == "__main__":
     main()

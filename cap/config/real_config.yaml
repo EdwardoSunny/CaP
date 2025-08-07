@@ -35,7 +35,7 @@ lmp_config:
       include_context: true
       has_return: true
       return_val_name: ret_val
-      debug_mode: false
+      debug_mode: true 
 
     parse_position:
       prompt_fname: parse_position_prompt
@@ -50,7 +50,7 @@ lmp_config:
       include_context: true
       has_return: true
       return_val_name: ret_val
-      debug_mode: false
+      debug_mode: true 
 
     parse_question:
       prompt_fname: parse_question_prompt
@@ -66,7 +66,7 @@ lmp_config:
       include_context: true
       has_return: true
       return_val_name: ret_val
-      debug_mode: false
+      debug_mode: true 
 
     transform_shape_pts:
       prompt_fname: transform_shape_pts_prompt
@@ -81,7 +81,7 @@ lmp_config:
       include_context: true
       has_return: true
       return_val_name: new_shape_pts
-      debug_mode: false
+      debug_mode: true 
 
     fgen:
       prompt_fname: fgen_prompt
@@ -97,5 +97,5 @@ lmp_config:
       include_context: false
       return_val_name: ret_val
       load_cache: true
-      debug_mode: false
+      debug_mode: true 
 

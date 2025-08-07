@@ -196,3 +196,11 @@ objects = ['brown bowl', 'red block', 'brown block', 'red bowl', 'pink bowl', 'p
 farthest_bowl_name = parse_obj_name('the bowl farthest from the red block', f'objects = {get_obj_names()}')
 say(f'Putting the red block on the {farthest_bowl_name}')
 put_first_on_second('red block', farthest_bowl_name)
+
+# move the arm up by 10cm
+say('Raising the arm up by 10 centimeters')
+move_up(distance=10.0) 
+
+# move the arm down by 10cm
+say('Lowering the arm down by 10 centimeters')
+move_down(distance=10.0)
