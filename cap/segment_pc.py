@@ -23,28 +23,6 @@ except ImportError:
     HAS_OPEN3D = False
     print("Open3D not available. Visualization and PLY saving will be disabled.")
 
-# --- 1. INITIALIZE SEGMENTATION MODELS GLOBALLY ---
-print("Initializing segmentation models...")
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using device: {device}")
-
-print("Loading CLIP model...")
-clip_model = AutoModel.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K").to(device)
-clip_processor = AutoProcessor.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
-print("CLIP model loaded.")
-
-print("Loading SAM2 model...")
-sam2_checkpoint = "ckpt/sam2.1_hiera_large.pt"
-model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
-sam2 = build_sam2(model_cfg, sam2_checkpoint, apply_postprocessing=False, device=device)
-sam_generator = SAM2AutomaticMaskGenerator(
-    model=sam2, points_per_side=32, points_per_batch=128,
-    pred_iou_thresh=0.88, stability_score_thresh=0.95, min_mask_region_area=200.0,
-)
-print("SAM2 model loaded.")
-print("All models initialized successfully.")
-
-
 # --- Segmentation Helper Functions ---
 
 def extract_segmented_objects(image, masks):
@@ -227,6 +205,27 @@ class SegmentedPointCloudMerger:
         print("All cameras stopped.")
 
 def main():
+    # --- 1. INITIALIZE SEGMENTATION MODELS GLOBALLY ---
+    print("Initializing segmentation models...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+
+    print("Loading CLIP model...")
+    clip_model = AutoModel.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K").to(device)
+    clip_processor = AutoProcessor.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
+    print("CLIP model loaded.")
+
+    print("Loading SAM2 model...")
+    sam2_checkpoint = "ckpt/sam2.1_hiera_large.pt"
+    model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+    sam2 = build_sam2(model_cfg, sam2_checkpoint, apply_postprocessing=False, device=device)
+    sam_generator = SAM2AutomaticMaskGenerator(
+        model=sam2, points_per_side=32, points_per_batch=128,
+        pred_iou_thresh=0.88, stability_score_thresh=0.95, min_mask_region_area=200.0,
+    )
+    print("SAM2 model loaded.")
+    print("All models initialized successfully.")
+
     # --- CONFIGURATION ---
     TEXT_PROMPT = "a red cube"
     CAMERA_SERIALS = ["317422074281", "317422075456"]

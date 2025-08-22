@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class LMPWrapper:
-    def __init__(self, env, xarm_config, frequency=30, command_latency=0.01):
+    def __init__(self, env, xarm_config, frequency=30, command_latency=0.01, camera_serials=["317422074281", "317422075456"]):
         """
         Initialize robot primitives using teleop script's exact components.
 
@@ -39,6 +39,28 @@ class LMPWrapper:
         self._setup_lmp_environment()
 
         logger.info(f"Robot Primitives initialized. Current pose: {self._current_pose}")
+
+        # INITIALIZE SEGMENTATION MODELS GLOBALLY
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        print("Loading CLIP model...")
+        self.clip_model = AutoModel.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K").to(device)
+        self.clip_processor = AutoProcessor.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
+        print("CLIP model loaded.")
+
+        print("Loading SAM2 model...")
+        sam2_checkpoint = "ckpt/sam2.1_hiera_large.pt"
+        model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+        sam2 = build_sam2(model_cfg, sam2_checkpoint, apply_postprocessing=False, device=device)
+        self.sam_generator = SAM2AutomaticMaskGenerator(
+            model=sam2, points_per_side=32, points_per_batch=128,
+            pred_iou_thresh=0.88, stability_score_thresh=0.95, min_mask_region_area=200.0,
+        )
+        print("SAM2 model loaded.")
+        print("All models initialized successfully.")
+        
+
+        self.merger = SegmentedPointCloudMerger(camera_serials=camera_serials, calib_units="mm", point_cloud_units="m")
 
     def _setup_lmp_environment(self):
         """Setup LMP-specific environment variables and object tracking."""
@@ -82,6 +104,12 @@ class LMPWrapper:
             "brown": (0.6, 0.3, 0.1, 1.0),
             "gray": (0.5, 0.5, 0.5, 1.0),
         }
+
+    def detect_object_location(prompt):
+        merged_points, merged_colors = merger.capture_merged_segmented_pointcloud(
+            text_prompt=prompt, sam_gen=self.sam_generator,
+            clip_mod=self.clip_model, clip_proc=self.clip_processor, device_str=self.device
+        )
 
     def get_robot_pos(self):
         """Return robot end-effector xyz position in robot base frame."""
