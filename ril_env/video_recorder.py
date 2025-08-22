@@ -56,7 +56,7 @@ class VideoRecorder:
         codec,
         input_pix_fmt,
         # options for codec
-        **kwargs
+        **kwargs,
     ):
         """
         input_pix_fmt: rgb24, bgr24 see https://github.com/PyAV-Org/PyAV/blob/bc4eedd5fc474e0f25b22102b2771fe5a42bb1c7/av/video/frame.pyx#L352
@@ -86,7 +86,7 @@ class VideoRecorder:
         output_pix_fmt="yuv420p",
         crf=18,
         profile="high",
-        **kwargs
+        **kwargs,
     ):
         obj = cls(
             fps=fps,
@@ -94,7 +94,7 @@ class VideoRecorder:
             input_pix_fmt=input_pix_fmt,
             pix_fmt=output_pix_fmt,
             options={"crf": str(crf), "profile": profile},
-            **kwargs
+            **kwargs,
         )
         return obj
 

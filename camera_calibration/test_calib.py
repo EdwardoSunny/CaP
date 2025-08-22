@@ -51,9 +51,9 @@ class PixelSelector:
 
 def goto(robot, realsense_streamer, pixel_selector, TCR, refine=False):
     # right
-    # print(TCR)
-    # TCR[0,3] += 25
-    # TCR[1,3] += 25
+    # print(TCR) IN MM
+    # TCR[0,3] += -20 - 15
+    # TCR[1,3] += 5
 
     for i in range(5):
         _, rgb_image, depth_frame, depth_img = realsense_streamer.capture_rgbd()
@@ -111,7 +111,8 @@ def goto(robot, realsense_streamer, pixel_selector, TCR, refine=False):
 
 
 if __name__ == "__main__":
-    serial_no = "317422075456"
+    # serial_no = "317422075456"
+    serial_no = "317422074281"
 
     # Get camera, load transforms, load robot
     realsense_streamer = RealsenseStreamer(serial_no)

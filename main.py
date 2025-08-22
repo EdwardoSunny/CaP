@@ -15,6 +15,7 @@ from ril_env.real_env import RealEnv
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 def main(
     output="./recordings/",
     vis_camera_idx=0,
@@ -31,37 +32,41 @@ def main(
 
     with SharedMemoryManager() as shm_manager:
         with RealEnv(
-                output_dir=output_dir,
-                xarm_config=xarm_config,
-                frequency=frequency,
-                num_obs_steps=2,
-                obs_image_resolution=record_res,
-                max_obs_buffer_size=30,
-                obs_float32=True,
-                init_joints=init_joints,
-                video_capture_fps=30,
-                video_capture_resolution=record_res,
-                record_raw_video=True,
-                thread_per_video=3,
-                video_crf=21,
-                enable_multi_cam_vis=False,  # Totally broken RN
-                multi_cam_vis_resolution=(1280, 720),
-                shm_manager=shm_manager,
-            ) as env:
-                logger.info("Configuring camera settings...")
-                env.realsense.set_exposure(exposure=120, gain=0)
-                env.realsense.set_white_balance(white_balance=5900)
-                time.sleep(1)
-                logger.info("System initialized")
+            output_dir=output_dir,
+            xarm_config=xarm_config,
+            frequency=frequency,
+            num_obs_steps=2,
+            obs_image_resolution=record_res,
+            max_obs_buffer_size=30,
+            obs_float32=True,
+            init_joints=init_joints,
+            video_capture_fps=30,
+            video_capture_resolution=record_res,
+            record_raw_video=True,
+            thread_per_video=3,
+            video_crf=21,
+            enable_multi_cam_vis=False,  # Totally broken RN
+            multi_cam_vis_resolution=(1280, 720),
+            shm_manager=shm_manager,
+        ) as env:
+            logger.info("Configuring camera settings...")
+            env.realsense.set_exposure(exposure=120, gain=0)
+            env.realsense.set_white_balance(white_balance=5900)
+            time.sleep(1)
+            logger.info("System initialized")
 
-                config = load_config('cap/config/real_config.yaml')
-                lmp_tabletop_ui, lmp_env = setup_LMP(config, env, xarm_config)
-                # lmp_env.close_gripper()
-                # time.sleep(1)
-                # lmp_env.open_gripper()
+            config = load_config("cap/config/real_config.yaml")
+            lmp_tabletop_ui, lmp_env = setup_LMP(config, env, xarm_config)
+            # lmp_env.close_gripper()
+            # time.sleep(1)
+            # lmp_env.open_gripper()
 
-                lmp_env.update_object_list(['red block', 'blue bowl'])
-                lmp_tabletop_ui("Move up by 20 cm and close the gripper, wait 1 second, then open it again, then move back down", f'objects = {lmp_env.get_obj_names()}')
+            lmp_env.update_object_list(["red block", "blue bowl"])
+            lmp_tabletop_ui(
+                "Move up by 20 cm and close the gripper, wait 1 second, then open it again, then move back down",
+                f"objects = {lmp_env.get_obj_names()}",
+            )
+
 
 if __name__ == "__main__":
     main()

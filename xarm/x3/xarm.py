@@ -192,7 +192,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
         is_radian=None,
         wait=False,
         timeout=None,
-        **kwargs
+        **kwargs,
     ):
         is_radian = self._default_is_radian if is_radian is None else is_radian
         only_check_type = kwargs.get("only_check_type", self._only_check_type)
@@ -307,7 +307,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
         is_radian=None,
         wait=False,
         timeout=None,
-        **kwargs
+        **kwargs,
     ):
         is_radian = self._default_is_radian if is_radian is None else is_radian
         only_check_type = kwargs.get("only_check_type", self._only_check_type)
@@ -404,7 +404,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
                 is_radian=True,
                 wait=wait,
                 timeout=timeout,
-                **kwargs
+                **kwargs,
             )
 
     @xarm_wait_until_not_pause
@@ -426,7 +426,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
         is_radian=None,
         wait=False,
         timeout=None,
-        **kwargs
+        **kwargs,
     ):
         only_check_type = kwargs.get("only_check_type", self._only_check_type)
         if only_check_type > 0 and wait:
@@ -451,7 +451,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
                 is_radian=is_radian,
                 wait=wait,
                 timeout=timeout,
-                **kwargs
+                **kwargs,
             )
         else:
             return self._set_position_absolute(
@@ -468,7 +468,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
                 is_radian=is_radian,
                 wait=wait,
                 timeout=timeout,
-                **kwargs
+                **kwargs,
             )
 
     @xarm_wait_until_not_pause
@@ -489,7 +489,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
         wait=False,
         timeout=None,
         radius=None,
-        **kwargs
+        **kwargs,
     ):
         is_radian = self._default_is_radian if is_radian is None else is_radian
         only_check_type = kwargs.get("only_check_type", self._only_check_type)
@@ -567,7 +567,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
         wait=False,
         timeout=None,
         radius=None,
-        **kwargs
+        **kwargs,
     ):
         is_radian = self._default_is_radian if is_radian is None else is_radian
         only_check_type = kwargs.get("only_check_type", self._only_check_type)
@@ -652,7 +652,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
         is_radian=None,
         is_tool_coord=False,
         relative=False,
-        **kwargs
+        **kwargs,
     ):
         is_radian = self._default_is_radian if is_radian is None else is_radian
         assert len(mvpose) >= 6
@@ -691,7 +691,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
         wait=False,
         timeout=None,
         radius=None,
-        **kwargs
+        **kwargs,
     ):
         is_radian = self._default_is_radian if is_radian is None else is_radian
         only_check_type = kwargs.get("only_check_type", self._only_check_type)
@@ -755,7 +755,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
         wait=False,
         timeout=None,
         radius=None,
-        **kwargs
+        **kwargs,
     ):
         is_radian = self._default_is_radian if is_radian is None else is_radian
         only_check_type = kwargs.get("only_check_type", self._only_check_type)
@@ -824,7 +824,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
                 wait=wait,
                 timeout=timeout,
                 radius=radius,
-                **kwargs
+                **kwargs,
             )
 
     @xarm_wait_until_not_pause
@@ -842,7 +842,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
         wait=False,
         timeout=None,
         radius=None,
-        **kwargs
+        **kwargs,
     ):
         assert (
             (servo_id is None or servo_id == 8) and isinstance(angle, Iterable)
@@ -874,7 +874,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
                 wait=wait,
                 timeout=timeout,
                 radius=radius,
-                **kwargs
+                **kwargs,
             )
         else:
             return self._set_servo_angle_absolute(
@@ -886,7 +886,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
                 wait=wait,
                 timeout=timeout,
                 radius=radius,
-                **kwargs
+                **kwargs,
             )
 
     @xarm_is_ready(_type="set")
@@ -928,7 +928,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
         mvtime=None,
         is_radian=None,
         is_tool_coord=False,
-        **kwargs
+        **kwargs,
     ):
         # if not self._check_mode_is_correct(1):
         #     return APIState.MODE_IS_NOT_CORRECT
@@ -964,7 +964,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
         timeout=None,
         is_tool_coord=False,
         is_axis_angle=False,
-        **kwargs
+        **kwargs,
     ):
         is_radian = self._default_is_radian if is_radian is None else is_radian
         only_check_type = kwargs.get("only_check_type", self._only_check_type)
@@ -1032,7 +1032,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
         is_radian=None,
         wait=False,
         timeout=None,
-        **kwargs
+        **kwargs,
     ):
         is_radian = self._default_is_radian if is_radian is None else is_radian
         only_check_type = kwargs.get("only_check_type", self._only_check_type)
@@ -1090,7 +1090,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
                 speed=spd,
                 mvacc=acc,
                 mvtime=mvt,
-                wait=True
+                wait=True,
             )
             if _ < 0:
                 logger.error("quit, api failed, code={}".format(_))
@@ -1122,7 +1122,7 @@ class XArm(Gripper, Servo, Record, RobotIQ, BaseBoard, Track, FtSensor, ModbusTc
                     wait=False,
                     speed=spd,
                     mvacc=acc,
-                    mvtime=mvt
+                    mvtime=mvt,
                 )
                 if ret < 0:
                     return -1

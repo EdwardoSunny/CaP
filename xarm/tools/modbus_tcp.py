@@ -234,7 +234,7 @@ class ModbusTcpClient(object):
             w_addr,
             len(w_regs),
             len(w_regs) * 2,
-            *w_regs
+            *w_regs,
         )
         code, res_data = self.__request(pdu)
         if code == 0 and len(res_data) == 9 + r_quantity * 2:

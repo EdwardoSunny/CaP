@@ -13,13 +13,13 @@ point_clouds = []
 for i, file in enumerate(ply_files):
     print(f"Loading {file}...")
     pcd = o3d.io.read_point_cloud(file)
-    
+
     # Optional: downsample for better performance
     pcd = pcd.voxel_down_sample(voxel_size=0.005)
-    
+
     # Optional: remove outliers
     pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-    
+
     point_clouds.append(pcd)
 
 # Visualize separately

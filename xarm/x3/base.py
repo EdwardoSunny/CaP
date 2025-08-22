@@ -3219,7 +3219,7 @@ class Base(BaseObject, Events):
         host_id=XCONF.TGPIO_HOST_ID,
         is_transparent_transmission=False,
         use_503_port=False,
-        **kwargs
+        **kwargs,
     ):
         if not self.connected:
             return APIState.NOT_CONNECTED, []

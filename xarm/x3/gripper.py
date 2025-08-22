@@ -155,7 +155,7 @@ class Gripper(GPIO):
         auto_enable=False,
         timeout=None,
         is_modbus=True,
-        **kwargs
+        **kwargs,
     ):
         if is_modbus:
             return self._set_modbus_gripper_position(
@@ -164,7 +164,7 @@ class Gripper(GPIO):
                 speed=speed,
                 auto_enable=auto_enable,
                 timeout=timeout,
-                **kwargs
+                **kwargs,
             )
         else:
             return self._set_gripper_position(
@@ -173,7 +173,7 @@ class Gripper(GPIO):
                 speed=speed,
                 auto_enable=auto_enable,
                 timeout=timeout,
-                **kwargs
+                **kwargs,
             )
 
     @xarm_is_connected(_type="get")

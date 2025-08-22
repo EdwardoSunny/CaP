@@ -328,7 +328,7 @@ class BlocklyToolOld(object):
         error_exit=True,
         stop_exit=True,
         show_comment=False,
-        **kwargs
+        **kwargs,
     ):
         self._show_comment = show_comment
         self._succeed = True

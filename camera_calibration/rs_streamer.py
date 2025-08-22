@@ -209,7 +209,8 @@ class RealsenseStreamer:
 
 if __name__ == "__main__":
     # realsense_streamer  = RealsenseStreamer('317222072157')
-    realsense_streamer = RealsenseStreamer("317422075456")  # 317422074281 small
+    # realsense_streamer = RealsenseStreamer("317422075456")  # 317422074281 small
+    realsense_streamer = RealsenseStreamer("317422074281")
     marker_search = MarkSearch()
 
     frames = []

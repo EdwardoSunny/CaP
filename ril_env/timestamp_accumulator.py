@@ -95,9 +95,13 @@ class TimestampObsAccumulator:
     def data(self):
         if self.timestamp_buffer is None:
             return dict()
-        print("Accumulator stats - len:", len(self), "buffer shape:", 
-              {k: v.shape for k, v in self.obs_buffer.items()})
-        
+        print(
+            "Accumulator stats - len:",
+            len(self),
+            "buffer shape:",
+            {k: v.shape for k, v in self.obs_buffer.items()},
+        )
+
         result = dict()
         for key, value in self.obs_buffer.items():
             result[key] = value[: len(self)]
@@ -156,7 +160,9 @@ class TimestampObsAccumulator:
             this_max_size = global_idxs[-1] + 1
             if this_max_size > len(self.timestamp_buffer):
                 # reallocate
-                print(f"Reallocating from {len(self.timestamp_buffer)} to {this_max_size}")
+                print(
+                    f"Reallocating from {len(self.timestamp_buffer)} to {this_max_size}"
+                )
                 new_size = max(this_max_size, len(self.timestamp_buffer) * 2)
                 for key in list(self.obs_buffer.keys()):
                     new_shape = (new_size,) + self.obs_buffer[key].shape[1:]

@@ -30,7 +30,7 @@ class BlocklyTool(_BlocklyHandler):
         state=0,
         error_exit=True,
         stop_exit=True,
-        **kwargs
+        **kwargs,
     ):
         if not self._is_converted:
             self._is_exec = kwargs.get("is_exec", False)

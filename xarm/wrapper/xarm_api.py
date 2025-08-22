@@ -87,7 +87,7 @@ class XArmAPI(object):
             is_radian=is_radian,
             do_not_open=do_not_open,
             instance=self,
-            **kwargs
+            **kwargs,
         )
         self._studio = Studio(port, True)
         self.__attr_alias_map = {
@@ -789,7 +789,7 @@ class XArmAPI(object):
         is_radian=None,
         wait=False,
         timeout=None,
-        **kwargs
+        **kwargs,
     ):
         """
         Set the cartesian position, the API will modify self.last_used_position value
@@ -853,7 +853,7 @@ class XArmAPI(object):
             is_radian=is_radian,
             wait=wait,
             timeout=timeout,
-            **kwargs
+            **kwargs,
         )
 
     def set_tool_position(
@@ -871,7 +871,7 @@ class XArmAPI(object):
         wait=False,
         timeout=None,
         radius=None,
-        **kwargs
+        **kwargs,
     ):
         """
         Movement relative to the tool coordinate system
@@ -931,7 +931,7 @@ class XArmAPI(object):
             wait=wait,
             timeout=timeout,
             radius=radius,
-            **kwargs
+            **kwargs,
         )
 
     def get_servo_angle(self, servo_id=None, is_radian=None, is_real=False):
@@ -965,7 +965,7 @@ class XArmAPI(object):
         wait=False,
         timeout=None,
         radius=None,
-        **kwargs
+        **kwargs,
     ):
         """
         Set the servo angle, the API will modify self.last_used_angles value
@@ -1019,7 +1019,7 @@ class XArmAPI(object):
             wait=wait,
             timeout=timeout,
             radius=radius,
-            **kwargs
+            **kwargs,
         )
 
     def set_servo_angle_j(
@@ -1046,7 +1046,7 @@ class XArmAPI(object):
             mvacc=mvacc,
             mvtime=mvtime,
             is_radian=is_radian,
-            **kwargs
+            **kwargs,
         )
 
     def set_servo_cartesian(
@@ -1057,7 +1057,7 @@ class XArmAPI(object):
         mvtime=0,
         is_radian=None,
         is_tool_coord=False,
-        **kwargs
+        **kwargs,
     ):
         """
         Set the servo cartesian, execute only the last instruction, need to be set to servo motion mode(self.set_mode(1))
@@ -1079,7 +1079,7 @@ class XArmAPI(object):
             mvtime=mvtime,
             is_radian=is_radian,
             is_tool_coord=is_tool_coord,
-            **kwargs
+            **kwargs,
         )
 
     def move_circle(
@@ -1095,7 +1095,7 @@ class XArmAPI(object):
         timeout=None,
         is_tool_coord=False,
         is_axis_angle=False,
-        **kwargs
+        **kwargs,
     ):
         """
         The motion calculates the trajectory of the space circle according to the three-point coordinates.
@@ -1130,7 +1130,7 @@ class XArmAPI(object):
             timeout=timeout,
             is_tool_coord=is_tool_coord,
             is_axis_angle=is_axis_angle,
-            **kwargs
+            **kwargs,
         )
 
     def move_gohome(
@@ -1141,7 +1141,7 @@ class XArmAPI(object):
         is_radian=None,
         wait=False,
         timeout=None,
-        **kwargs
+        **kwargs,
     ):
         """
         Move to go home (Back to zero), the API will modify self.last_used_position and self.last_used_angles value
@@ -1169,7 +1169,7 @@ class XArmAPI(object):
             is_radian=is_radian,
             wait=wait,
             timeout=timeout,
-            **kwargs
+            **kwargs,
         )
 
     def move_arc_lines(
@@ -1410,7 +1410,7 @@ class XArmAPI(object):
             filename=filename,
             wait=wait,
             double_speed=double_speed,
-            **kwargs
+            **kwargs,
         )
 
     def get_trajectory_rw_status(self):
@@ -2054,7 +2054,7 @@ class XArmAPI(object):
             speed=speed,
             auto_enable=auto_enable,
             timeout=timeout,
-            **kwargs
+            **kwargs,
         )
 
     def set_gripper_speed(self, speed, **kwargs):
@@ -2751,7 +2751,7 @@ class XArmAPI(object):
         wait=False,
         timeout=None,
         radius=None,
-        **kwargs
+        **kwargs,
     ):
         """
         Set the pose represented by the axis angle pose
@@ -2798,7 +2798,7 @@ class XArmAPI(object):
             wait=wait,
             timeout=timeout,
             radius=radius,
-            **kwargs
+            **kwargs,
         )
 
     def set_servo_cartesian_aa(
@@ -2809,7 +2809,7 @@ class XArmAPI(object):
         is_radian=None,
         is_tool_coord=False,
         relative=False,
-        **kwargs
+        **kwargs,
     ):
         """
         Set the servo cartesian represented by the axis angle pose, execute only the last instruction, need to be set to servo motion mode(self.set_mode(1))
@@ -2833,7 +2833,7 @@ class XArmAPI(object):
             is_radian=is_radian,
             is_tool_coord=is_tool_coord,
             relative=relative,
-            **kwargs
+            **kwargs,
         )
 
     def get_pose_offset(
@@ -3228,7 +3228,7 @@ class XArmAPI(object):
         host_id=9,
         is_transparent_transmission=False,
         use_503_port=False,
-        **kwargs
+        **kwargs,
     ):
         """
         Send the modbus data to the tool gpio
@@ -3254,7 +3254,7 @@ class XArmAPI(object):
             host_id=host_id,
             is_transparent_transmission=is_transparent_transmission,
             use_503_port=use_503_port,
-            **kwargs
+            **kwargs,
         )
 
     def set_report_tau_or_i(self, tau_or_i=0):
@@ -3377,7 +3377,7 @@ class XArmAPI(object):
             is_radian=is_radian,
             is_tool_coord=is_tool_coord,
             duration=duration,
-            **kwargs
+            **kwargs,
         )
 
     def calibrate_tcp_coordinate_offset(self, four_points, is_radian=None):
@@ -3605,7 +3605,7 @@ class XArmAPI(object):
         return self._arm.ft_sensor_cali_load(
             iden_result_list,
             association_setting_tcp_load=association_setting_tcp_load,
-            **kwargs
+            **kwargs,
         )
 
     def ft_sensor_enable(self, on_off):

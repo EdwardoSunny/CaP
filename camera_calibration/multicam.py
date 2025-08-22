@@ -276,10 +276,63 @@ class MultiCam:
 
         def gen_calib_waypoints(start_pos):
             waypoints = []
-            for i in np.linspace(200, 400, 4):
-                for j in np.linspace(-150, 150, 4):
-                    for k in np.linspace(200, 500, 3):
+
+            # Close range waypoints (near robot base) - reduced height
+            for i in np.linspace(200, 400, 3):
+                for j in np.linspace(-150, 150, 4):  # More Y positions
+                    for k in np.linspace(150, 280, 3):  # Lower heights: 150-280mm
                         waypoints.append(np.array([i, j, k]))
+
+            # Medium range waypoints (table center area) - optimized for camera view
+            for i in np.linspace(420, 550, 3):  # Reduced max reach to 550mm
+                for j in np.linspace(-120, 120, 4):  # Good Y coverage
+                    for k in np.linspace(130, 220, 3):  # Lower heights: 130-220mm
+                        waypoints.append(np.array([i, j, k]))
+
+            # Extended range waypoints (conservative forward reach)
+            for i in np.linspace(570, 620, 2):  # Much more conservative: only to 620mm
+                for j in np.linspace(-60, 60, 3):  # Narrower Y for extended reach
+                    for k in np.linspace(130, 180, 2):  # Low heights: 130-180mm
+                        waypoints.append(np.array([i, j, k]))
+
+            # Additional intermediate coverage for smooth calibration
+            for i in np.linspace(350, 500, 3):  # Fill gaps in coverage
+                for j in np.linspace(-100, 100, 3):
+                    for k in np.linspace(140, 200, 2):  # Safe intermediate heights
+                        waypoints.append(np.array([i, j, k]))
+
+            # Corner positions for better calibration coverage (more conservative)
+            corner_positions = [
+                # Forward positions (reduced reach)
+                [580, -50, 140],
+                [580, 50, 140],
+                [600, -30, 150],
+                [600, 30, 150],
+                # Side positions
+                [450, -130, 160],
+                [450, 130, 160],
+                [500, -110, 150],
+                [500, 110, 150],
+                # Center positions at various heights
+                [400, 0, 140],
+                [500, 0, 150],
+                [550, 0, 160],
+            ]
+
+            for pos in corner_positions:
+                waypoints.append(np.array(pos))
+
+            print(f"Generated {len(waypoints)} total waypoints")
+            print(
+                f"Height range: {min([w[2] for w in waypoints]):.0f}mm to {max([w[2] for w in waypoints]):.0f}mm"
+            )
+            print(
+                f"Forward range: {min([w[0] for w in waypoints]):.0f}mm to {max([w[0] for w in waypoints]):.0f}mm"
+            )
+            print(
+                f"Side range: {min([w[1] for w in waypoints]):.0f}mm to {max([w[1] for w in waypoints]):.0f}mm"
+            )
+
             return waypoints
 
         if robot is None:
@@ -293,7 +346,7 @@ class MultiCam:
         waypoints = gen_calib_waypoints(ee_pos)
 
         calib_eulers = []
-        z_offsets = [0]
+        z_offsets = [0, -30]
         for z_off in z_offsets:
             calib_euler = ee_euler + np.array([5, -5, z_off])
             calib_eulers.append(calib_euler)
@@ -301,13 +354,14 @@ class MultiCam:
         waypoints_rob = []
         waypoints_cam = {c.serial_no: [] for c in self.cameras}
 
-        state_log = robot.move_to_ee_pose(ee_pos, calib_euler)
+        # Fix: Use the first euler angle for initialization
+        initial_calib_euler = calib_eulers[0]
+        state_log = robot.move_to_ee_pose(ee_pos, initial_calib_euler)
 
         itr = 0
         for waypoint in waypoints:
-            print(itr, waypoint)
+            print(f"{itr}: Testing waypoint {waypoint}")
             itr += 1
-            # print(waypoint)
             successful_waypoint = True
 
             intermed_waypoints = {}
@@ -320,21 +374,78 @@ class MultiCam:
 
                 _, rgb_image, depth_frame, depth_img = cam.capture_rgbd()
                 (u, v), vis = self.marker_search.find_marker(rgb_image)
+
+                # Display the RGB image with marker detection result
+                display_image = rgb_image.copy()
+                if u is not None and v is not None:
+                    # Draw circle at detected marker position
+                    cv2.circle(display_image, (int(u), int(v)), 10, (0, 255, 0), 2)
+                    cv2.putText(
+                        display_image,
+                        f"Marker: ({int(u)}, {int(v)})",
+                        (int(u) + 15, int(v) - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 255, 0),
+                        2,
+                    )
+                    print(f"  Camera {cam.serial_no}: marker found at ({u}, {v})")
+                else:
+                    cv2.putText(
+                        display_image,
+                        "NO MARKER FOUND",
+                        (50, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (0, 0, 255),
+                        2,
+                    )
+                    print(f"  Camera {cam.serial_no}: marker NOT found")
+
+                # Add waypoint info to image
+                cv2.putText(
+                    display_image,
+                    f"Waypoint {itr-1}: {waypoint}",
+                    (10, display_image.shape[0] - 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 255, 255),
+                    1,
+                )
+                cv2.putText(
+                    display_image,
+                    f"Camera: {cam.serial_no}",
+                    (10, display_image.shape[0] - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 255, 255),
+                    1,
+                )
+
+                # Show the image
+                window_name = f"Camera {cam.serial_no} - Calibration"
+                cv2.imshow(window_name, display_image)
+                cv2.waitKey(500)  # Display for 500ms so you can see it
+
                 if u is None:
                     successful_waypoint = False
                     break
 
                 waypoint_cam = np.array(cam.deproject((u, v), depth_frame))
-                print(waypoint_cam)
+                print(f"  Camera {cam.serial_no}: 3D position {waypoint_cam}")
                 waypoint_cam = 1000.0 * waypoint_cam
-                print(waypoint_cam)
+                print(f"  Camera {cam.serial_no}: scaled position {waypoint_cam}")
                 intermed_waypoints[cam.serial_no] = waypoint_cam
 
             if successful_waypoint:
                 waypoints_rob.append([waypoint[0], waypoint[1], waypoint[2]])
                 for k in intermed_waypoints:
                     waypoints_cam[k].append(intermed_waypoints[k])
+                print(f"  ✓ Waypoint {itr-1} successful")
+            else:
+                print(f"  ✗ Waypoint {itr-1} failed")
 
+        print(f"\nTotal successful waypoints: {len(waypoints_rob)}")
         pprint.pprint(waypoints_cam)
         pprint.pprint(waypoints_rob)
 
@@ -345,6 +456,9 @@ class MultiCam:
         for cam in self.cameras:
             waypoints_cam_curr = waypoints_cam[cam.serial_no]
             waypoints_cam_curr = np.array(waypoints_cam_curr)
+            print(
+                f"Camera {cam.serial_no}: {len(waypoints_cam_curr)} successful detections"
+            )
             trc, tcr = self.solver.solve_transforms(waypoints_rob, waypoints_cam_curr)
             transforms[cam.serial_no] = {"trc": trc, "tcr": tcr}
 
@@ -355,9 +469,12 @@ class MultiCam:
 
 if __name__ == "__main__":
     # calibration
-    multi_cam = MultiCam(["317422075456"])
+    multi_cam = MultiCam(["317422074281", "317422075456"])  # Re-enabled both cameras
+    # multi_cam = MultiCam(["317422074281"])
     multi_cam.calibrate_cam()
 
     # Uncomment to take an image + merged point cloud
     # multi_cam = MultiCam(['317422075456'])
     # rgb_images, depth_images, pcd_merged = multi_cam.take_rgbd()
+
+    # Intel RealSense D435I   317422074281 for robopoint camera
