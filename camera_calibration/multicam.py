@@ -469,7 +469,7 @@ class MultiCam:
 
 if __name__ == "__main__":
     # calibration
-    multi_cam = MultiCam(["317422074281", "317422075456"])  # Re-enabled both cameras
+    multi_cam = MultiCam(["317422074281", "327122079374"])  # Re-enabled both cameras
     # multi_cam = MultiCam(["317422074281"])
     multi_cam.calibrate_cam()
 
