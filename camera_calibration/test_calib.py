@@ -17,6 +17,8 @@ GRIPPER_SPEED, GRIPPER_FORCE, GRIPPER_MAX_WIDTH, GRIPPER_TOLERANCE = (
 )
 
 
+TRANSFORMS_PATH = "/home/u-ril/xu/gamma/src/gamma/calibration/transform_pool/transforms.npy"
+
 class PixelSelector:
     def __init__(self):
         pass
@@ -111,12 +113,12 @@ def goto(robot, realsense_streamer, pixel_selector, TCR, refine=False):
 
 
 if __name__ == "__main__":
-    # serial_no = "317422075456"
+    # serial_no = "327122079374"
     serial_no = "317422074281"
 
     # Get camera, load transforms, load robot
     realsense_streamer = RealsenseStreamer(serial_no)
-    transforms = np.load("calib/transforms.npy", allow_pickle=True).item()
+    transforms = np.load(TRANSFORMS_PATH, allow_pickle=True).item()
     TCR = transforms[serial_no]["tcr"]
 
     robot = XarmEnv()
@@ -130,5 +132,5 @@ if __name__ == "__main__":
 
     res = input("save?")
     if res == "y" or res == "Y":
-        np.save("calib/transforms.npy", transforms)
+        np.save(TRANSFORMS_PATH, transforms)
         print("SAVED")

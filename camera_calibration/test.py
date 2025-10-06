@@ -21,6 +21,8 @@ from rs_streamer import RealsenseStreamer
 from multicam import XarmEnv
 import time
 
+TRANSFORMS_PATH = "/home/u-ril/xu/gamma/src/gamma/calibration/transform_pool/transforms.npy"
+
 
 # 317422075456
 # 317422074281
@@ -35,12 +37,12 @@ class ImageToRobotConverter:
         self.robot = XarmEnv()
 
         # Load calibration data
-        if not os.path.exists("calib/transforms.npy"):
+        if not os.path.exists(TRANSFORMS_PATH):
             raise FileNotFoundError(
                 "Calibration file not found. Run calibration first!"
             )
 
-        self.transforms = np.load("calib/transforms.npy", allow_pickle=True).item()
+        self.transforms = np.load(TRANSFORMS_PATH, allow_pickle=True).item()
         self.tcr = self.transforms[camera_serial]["tcr"]  # Camera-to-Robot transform
 
         print("System initialized successfully!")
