@@ -19,6 +19,7 @@ from sam2.build_sam import build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 from transformers import AutoModel, AutoProcessor
 
+
 CAMERA_SERIALS = ["317422074281", "327122079374"]
 
 def configure_realsense_cameras():
@@ -251,39 +252,20 @@ class RobotFrameMerger:
 
         profile = pipeline.start(config)
 
-        # Create post-processing filters for better depth quality
-        # Decimation filter - reduces depth frame density
-        decimation = rs.decimation_filter()
-        decimation.set_option(rs.option.filter_magnitude, 2)
+        # Create post-processing filters for better depth quality (simplified approach)
+        filters = [
+            rs.spatial_filter(),
+            rs.temporal_filter(),
+            rs.hole_filling_filter(),
+        ]
 
-        # Spatial filter - edge-preserving spatial smoothing
-        spatial = rs.spatial_filter()
-        spatial.set_option(rs.option.filter_magnitude, 2)
-        spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
-        spatial.set_option(rs.option.filter_smooth_delta, 20)
-
-        # Temporal filter - reduces noise over time
-        temporal = rs.temporal_filter()
-        temporal.set_option(rs.option.filter_smooth_alpha, 0.4)
-        temporal.set_option(rs.option.filter_smooth_delta, 20)
-
-        # Hole filling filter - fills holes in depth data
-        hole_filling = rs.hole_filling_filter()
-        hole_filling.set_option(rs.option.holes_fill, 1)  # 1 = farest from around
-
-        # Store filters with camera
+        # Store pipeline and filters with camera
         self.cameras[serial_number] = {
             'pipeline': pipeline,
-            'filters': {
-                'decimation': decimation,
-                'spatial': spatial,
-                'temporal': temporal,
-                'hole_filling': hole_filling
-            }
+            'filters': filters
         }
 
         print(f"Camera {serial_number} initialized with depth filters")
-        print(f"  - Decimation: magnitude 2")
         print(f"  - Spatial smoothing: enabled")
         print(f"  - Temporal smoothing: enabled")
         print(f"  - Hole filling: enabled")
@@ -305,38 +287,33 @@ class RobotFrameMerger:
             print(f"Failed to capture from camera {serial}")
             return None, None
 
-        # Apply post-processing filters to depth frame
-        depth_frame = filters['decimation'].process(depth_frame)
-        depth_frame = filters['spatial'].process(depth_frame)
-        depth_frame = filters['temporal'].process(depth_frame)
-        depth_frame = filters['hole_filling'].process(depth_frame)
+        # Apply post-processing filters to depth frame (simplified approach)
+        for filter in filters:
+            depth_frame = filter.process(depth_frame)
 
         color_image = np.asanyarray(color_frame.get_data())
 
-        # Create point cloud using RealSense
-        pc = rs.pointcloud()
-        pc.map_to(color_frame)
-        points = pc.calculate(depth_frame)
+        # Create point cloud using RealSense (same as realsense_toolbox)
+        raw_pcd = rs.pointcloud()
+        raw_pcd.map_to(color_frame)
+        points = raw_pcd.calculate(depth_frame)
 
-        # Extract points and colors
-        vtx = np.asanyarray(points.get_vertices())
-        tex = np.asanyarray(points.get_texture_coordinates())
-
-        points_3d = np.column_stack((vtx["f0"], vtx["f1"], vtx["f2"]))
+        # Extract points and colors (same as realsense_toolbox)
+        points_3d = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3)
+        tex = np.asanyarray(points.get_texture_coordinates()).view(np.float32).reshape(-1, 2)
 
         # Get colors
         h, w = color_image.shape[:2]
-        u = np.clip((tex["f0"] * w).astype(int), 0, w - 1)
-        v = np.clip((tex["f1"] * h).astype(int), 0, h - 1)
+        u = np.clip((tex[:, 0] * w).astype(np.int32), 0, w - 1)
+        v = np.clip((tex[:, 1] * h).astype(np.int32), 0, h - 1)
 
-        colors = color_image[v, u] / 255.0  # Normalize to [0,1]
-        colors = colors[:, [2, 1, 0]]  # BGR to RGB
+        colors = color_image[v, u][:, ::-1] / 255.0  # BGR to RGB and normalize to [0,1]
 
-        # Filter valid points
-        valid_mask = ((points_3d[:, 2] > min_depth)
+        # Filter valid points (same as realsense_toolbox)
+        valid_mask = (
+            (points_3d[:, 2] > min_depth)
             & (points_3d[:, 2] < max_depth)
-            & ~np.isnan(points_3d).any(axis=1)
-            & ~np.isinf(points_3d).any(axis=1)
+            & np.isfinite(points_3d).all(axis=1)
         )
 
         # Apply segmentation if text_prompt is provided
@@ -669,7 +646,7 @@ def main():
     ICP_FILE = "./transforms/icp_tf.npy"  # Optional ICP file (if it exists)
 
     # Segmentation configuration
-    TEXT_PROMPT = "bread"  # What object to segment (set to None to disable segmentation)
+    TEXT_PROMPT = "Brown bear"  # What object to segment (set to None to disable segmentation)
 
     # Optional workspace cropping bounds: [min_x, min_y, min_z, max_x, max_y, max_z] in meters
     WORKSPACE_BOUNDS = [0.15, -0.4, 0.08, 1.0, 0.35, 0.6]

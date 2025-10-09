@@ -92,32 +92,15 @@ def capture_and_visualize(serial_number, use_filters=True, max_depth=2.0, min_de
     print(f"Starting camera {serial_number}...")
     profile = pipeline.start(config)
 
-    # Create post-processing filters
+    # Create post-processing filters (simplified approach like realsense_toolbox)
     filters = None
     if use_filters:
         print("Setting up post-processing filters...")
-        decimation = rs.decimation_filter()
-        decimation.set_option(rs.option.filter_magnitude, 2)
-
-        spatial = rs.spatial_filter()
-        spatial.set_option(rs.option.filter_magnitude, 2)
-        spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
-        spatial.set_option(rs.option.filter_smooth_delta, 20)
-
-        temporal = rs.temporal_filter()
-        temporal.set_option(rs.option.filter_smooth_alpha, 0.4)
-        temporal.set_option(rs.option.filter_smooth_delta, 20)
-
-        hole_filling = rs.hole_filling_filter()
-        hole_filling.set_option(rs.option.holes_fill, 1)
-
-        filters = {
-            'decimation': decimation,
-            'spatial': spatial,
-            'temporal': temporal,
-            'hole_filling': hole_filling
-        }
-        print("  - Decimation filter: enabled")
+        filters = [
+            rs.spatial_filter(),
+            rs.temporal_filter(),
+            rs.hole_filling_filter(),
+        ]
         print("  - Spatial filter: enabled")
         print("  - Temporal filter: enabled")
         print("  - Hole filling filter: enabled")
@@ -136,10 +119,8 @@ def capture_and_visualize(serial_number, use_filters=True, max_depth=2.0, min_de
             frames = pipeline.wait_for_frames()
             depth_frame = frames.get_depth_frame()
             if filters:
-                depth_frame = filters['decimation'].process(depth_frame)
-                depth_frame = filters['spatial'].process(depth_frame)
-                depth_frame = filters['temporal'].process(depth_frame)
-                depth_frame = filters['hole_filling'].process(depth_frame)
+                for filter in filters:
+                    depth_frame = filter.process(depth_frame)
 
     print(f"\nCapturing point cloud from camera {serial_number}...")
 
@@ -155,38 +136,32 @@ def capture_and_visualize(serial_number, use_filters=True, max_depth=2.0, min_de
 
     # Apply filters if enabled
     if use_filters and filters:
-        depth_frame = filters['decimation'].process(depth_frame)
-        depth_frame = filters['spatial'].process(depth_frame)
-        depth_frame = filters['temporal'].process(depth_frame)
-        depth_frame = filters['hole_filling'].process(depth_frame)
+        for filter in filters:
+            depth_frame = filter.process(depth_frame)
 
     color_image = np.asanyarray(color_frame.get_data())
 
-    # Create point cloud
-    pc = rs.pointcloud()
-    pc.map_to(color_frame)
-    points = pc.calculate(depth_frame)
+    # Create point cloud (same as realsense_toolbox)
+    raw_pcd = rs.pointcloud()
+    raw_pcd.map_to(color_frame)
+    points = raw_pcd.calculate(depth_frame)
 
-    # Extract points and colors
-    vtx = np.asanyarray(points.get_vertices())
-    tex = np.asanyarray(points.get_texture_coordinates())
-
-    points_3d = np.column_stack((vtx["f0"], vtx["f1"], vtx["f2"]))
+    # Extract points and colors (same as realsense_toolbox)
+    points_3d = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3)
+    tex = np.asanyarray(points.get_texture_coordinates()).view(np.float32).reshape(-1, 2)
 
     # Get colors
     h, w = color_image.shape[:2]
-    u = np.clip((tex["f0"] * w).astype(int), 0, w - 1)
-    v = np.clip((tex["f1"] * h).astype(int), 0, h - 1)
+    u = np.clip((tex[:, 0] * w).astype(np.int32), 0, w - 1)
+    v = np.clip((tex[:, 1] * h).astype(np.int32), 0, h - 1)
 
-    colors = color_image[v, u] / 255.0  # Normalize to [0,1]
-    colors = colors[:, [2, 1, 0]]  # BGR to RGB
+    colors = color_image[v, u][:, ::-1] / 255.0  # BGR to RGB and normalize to [0,1]
 
-    # Filter valid points
+    # Filter valid points (same as realsense_toolbox)
     valid_mask = (
         (points_3d[:, 2] > min_depth)
         & (points_3d[:, 2] < max_depth)
-        & ~np.isnan(points_3d).any(axis=1)
-        & ~np.isinf(points_3d).any(axis=1)
+        & np.isfinite(points_3d).all(axis=1)
     )
 
     valid_points = points_3d[valid_mask]
