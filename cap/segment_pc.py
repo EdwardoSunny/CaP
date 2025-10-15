@@ -666,7 +666,7 @@ def main():
     ICP_FILE = "./transforms/icp_tf.npy"  # Optional ICP file (if it exists)
 
     # Segmentation configuration
-    TEXT_PROMPT = "Bread"  # What object to segment (set to None to disable segmentation)
+    TEXT_PROMPT = "Gray coffee machine"  # What object to segment (set to None to disable segmentation)
 
     # Optional workspace cropping bounds: [min_x, min_y, min_z, max_x, max_y, max_z] in meters
     WORKSPACE_BOUNDS = [0.15, -0.4, 0.08, 1.0, 0.35, 0.6]
