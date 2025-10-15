@@ -104,6 +104,7 @@ class RobotFrameMerger:
         camera_serials,
         calib_file="calib/transforms.npy",
         icp_file="calib/icp_tf.npy",
+        manual_offset_file="transforms/manual_offset.npy",
         calib_units="mm",
         point_cloud_units="m",
     ):
@@ -137,6 +138,17 @@ class RobotFrameMerger:
             print(
                 f"Loaded ICP transforms for cameras: {list(self.icp_transforms.keys())}"
             )
+
+        # Load manual offset if available (for fine-tuning alignment)
+        self.manual_offset = None
+        if os.path.exists(manual_offset_file):
+            offset_data = np.load(manual_offset_file, allow_pickle=True).item()
+            self.manual_offset = offset_data['transform']
+            print(f"Loaded manual offset from {manual_offset_file}")
+            if 'params' in offset_data:
+                params = offset_data['params']
+                print(f"  Manual offset parameters: tx={params['tx']:.4f}, ty={params['ty']:.4f}, "
+                      f"tz={params['tz']:.4f}, rx={params['rx']:.2f}, ry={params['ry']:.2f}, rz={params['rz']:.2f}")
 
         # Initialize cameras
         for serial in camera_serials:
@@ -327,6 +339,14 @@ class RobotFrameMerger:
             points_homo = np.hstack([points_robot, ones])
             points_robot = (icp_tf @ points_homo.T).T[:, :3]
             print(f"Camera {camera_serial}: Applied ICP refinement")
+
+        # Apply manual offset if available (only to second camera for fine-tuning alignment)
+        # The manual offset is typically tuned for the second camera to align with the first
+        if self.manual_offset is not None and camera_serial == self.camera_serials[1]:
+            ones = np.ones((points_robot.shape[0], 1))
+            points_homo = np.hstack([points_robot, ones])
+            points_robot = (self.manual_offset @ points_homo.T).T[:, :3]
+            print(f"Camera {camera_serial}: Applied manual offset for fine-tuning")
 
         return points_robot
 
