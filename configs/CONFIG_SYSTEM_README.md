@@ -83,7 +83,6 @@ workspace_bounds:
 ### Segmentation Settings
 ```yaml
 segmentation:
-  text_prompt: "Gray coffee machine"
   sam2_checkpoint: "ckpt/sam2.1_hiera_large.pt"
   sam2_model_cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
   clip_model: "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
@@ -170,12 +169,11 @@ camera_settings:
 
 All scripts will automatically use the new exposure value!
 
-### Example: Change Segmentation Target
+### Example: Change SAM2 Model Settings
 
 Edit `configs/camera_config.yaml`:
 ```yaml
 segmentation:
-  text_prompt: "Red apple"  # Changed from "Gray coffee machine"
 ```
 
 Run `segment_pc.py` and it will segment the new object!

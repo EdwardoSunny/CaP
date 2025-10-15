@@ -7,9 +7,9 @@ All camera configuration is in: **`configs/camera_config.yaml`**
 
 ### Change what object to segment:
 ```bash
-nano configs/camera_config.yaml
-# Find: text_prompt: "Gray coffee machine"
-# Change to: text_prompt: "Your object here"
+nano cap/segment_pc.py
+# Find: TEXT_PROMPT = "Gray coffee machine"
+# Change to: TEXT_PROMPT = "Your object here"
 ```
 
 ### Adjust camera exposure:

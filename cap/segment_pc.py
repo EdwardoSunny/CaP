@@ -591,7 +591,8 @@ def main():
     # Configure cameras
     configure_realsense_cameras(config)
 
-    TEXT_PROMPT = seg_config['text_prompt']
+    # Segmentation prompt (set this to what you want to segment, or None to disable)
+    TEXT_PROMPT = "Orange disinfecting wipes"
 
     # Optional workspace cropping bounds
     WORKSPACE_BOUNDS = None
