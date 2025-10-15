@@ -10,6 +10,7 @@ import pyrealsense2 as rs
 import os
 import sys
 import copy
+from camera_utils import load_camera_config, configure_realsense_cameras
 
 try:
     import open3d as o3d
@@ -19,69 +20,20 @@ except ImportError:
     print("ERROR: Open3D is required for this tool. Install with: pip install open3d")
     sys.exit(1)
 
-CAMERA_SERIALS = ["317422074281", "327122079374"]
-
-
-def configure_realsense_cameras():
-    """Configure RealSense cameras for better depth quality"""
-    camera_configs = {
-        "317422074281": {
-            "auto_exposure": 1,
-            "gain": 64,
-            "laser_power": 240,
-            "exposure": None,
-        },
-        "327122079374": {
-            "auto_exposure": 0,
-            "exposure": 500,
-            "gain": 16,
-            "laser_power": 320,
-        }
-    }
-
-    ctx = rs.context()
-    for dev in ctx.query_devices():
-        if dev.get_info(rs.camera_info.serial_number) not in CAMERA_SERIALS:
-            continue
-
-        serial = dev.get_info(rs.camera_info.serial_number)
-        config = camera_configs.get(serial, camera_configs["317422074281"])
-
-        print(f"\nConfiguring camera {serial}...")
-
-        adv = rs.rs400_advanced_mode(dev)
-        if not adv.is_enabled():
-            adv.toggle_advanced_mode(True)
-
-        stereo = next(
-            s for s in dev.query_sensors() if "Stereo" in s.get_info(rs.camera_info.name)
-        )
-        rgb_sensor = next(
-            (s for s in dev.query_sensors() if "RGB" in s.get_info(rs.camera_info.name)),
-            None
-        )
-
-        stereo.set_option(rs.option.enable_auto_exposure, config["auto_exposure"])
-        if config["auto_exposure"] == 0 and config.get("exposure") is not None:
-            stereo.set_option(rs.option.exposure, config["exposure"])
-        stereo.set_option(rs.option.gain, config["gain"])
-        stereo.set_option(rs.option.laser_power, config["laser_power"])
-
-        if rgb_sensor:
-            rgb_sensor.set_option(rs.option.enable_auto_white_balance, 1)
-            rgb_sensor.set_option(rs.option.enable_auto_exposure, 1)
-
-        print(f"  Camera {serial} configured successfully")
-
 
 class InteractiveAlignmentTuner:
     """Interactive point cloud alignment with visual editing"""
 
-    def __init__(self, camera_serials, calib_file="transforms/transforms.npy"):
+    def __init__(self, camera_serials, calib_file="transforms/transforms.npy", config=None):
         self.camera_serials = camera_serials
         self.cameras = {}
         self.current_transform = np.eye(4)
         self.final_offset = None
+
+        # Load config if not provided
+        if config is None:
+            config = load_camera_config()
+        self.config = config
 
         # Load calibration transforms
         if not os.path.exists(calib_file):
@@ -94,14 +46,18 @@ class InteractiveAlignmentTuner:
         for serial in camera_serials:
             self._init_camera(serial)
 
-    def _init_camera(self, serial_number, width=640, height=480, fps=30):
+    def _init_camera(self, serial_number):
         """Initialize a RealSense camera"""
+        stream_config = self.config['stream_config']
+
         pipeline = rs.pipeline()
         config = rs.config()
 
         config.enable_device(serial_number)
-        config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
-        config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
+        config.enable_stream(rs.stream.depth, stream_config['width'],
+                           stream_config['height'], rs.format.z16, stream_config['fps'])
+        config.enable_stream(rs.stream.color, stream_config['width'],
+                           stream_config['height'], rs.format.bgr8, stream_config['fps'])
 
         profile = pipeline.start(config)
 
@@ -119,8 +75,11 @@ class InteractiveAlignmentTuner:
 
         print(f"Camera {serial_number} initialized")
 
-    def capture_camera_pointcloud(self, serial, max_depth=2.0, min_depth=0.1):
+    def capture_camera_pointcloud(self, serial):
         """Capture point cloud from a single camera"""
+        pc_config = self.config['point_cloud']
+        max_depth = pc_config['max_depth']
+        min_depth = pc_config['min_depth']
         camera_data = self.cameras[serial]
         pipeline = camera_data['pipeline']
         filters = camera_data['filters']
@@ -517,17 +476,20 @@ class InteractiveAlignmentTuner:
 
 def main():
     """Main function"""
-    CAMERA_SERIALS = ["317422074281", "327122079374"]
-    CALIB_FILE = "./transforms/transforms.npy"
+    # Load configuration
+    config = load_camera_config()
+    camera_serials = config['camera_serials']
+    calib_config = config['calibration']
 
     # Configure cameras
-    configure_realsense_cameras()
+    configure_realsense_cameras(config)
 
     try:
         # Initialize tuner
         tuner = InteractiveAlignmentTuner(
-            camera_serials=CAMERA_SERIALS,
-            calib_file=CALIB_FILE
+            camera_serials=camera_serials,
+            calib_file=calib_config['transforms_file'],
+            config=config
         )
 
         # Run interactive alignment

@@ -11,6 +11,7 @@ import sys
 import time
 import torch
 from PIL import Image
+from camera_utils import load_camera_config, configure_realsense_cameras
 
 # Add SAM2 to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'segment/segment-anything2'))
@@ -18,86 +19,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'segment/segment-anyt
 from sam2.build_sam import build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 from transformers import AutoModel, AutoProcessor
-
-
-CAMERA_SERIALS = ["317422074281", "327122079374"]
-
-def configure_realsense_cameras():
-    """Configure RealSense cameras for better depth quality"""
-    # Camera-specific configurations
-    camera_configs = {
-        "317422074281": {  # Camera ending in 81
-            "auto_exposure": 1,
-            "gain": 64,
-            "laser_power": 240,
-            "exposure": None,  # Not used when auto_exposure is on
-        },
-        "327122079374": {  # Camera ending in 74
-            "auto_exposure": 0,
-            "exposure": 500,
-            "gain": 16,
-            "laser_power": 320,
-        }
-    }
-
-    ctx = rs.context()
-    for dev in ctx.query_devices():
-        if dev.get_info(rs.camera_info.serial_number) not in CAMERA_SERIALS:
-            continue
-
-        serial = dev.get_info(rs.camera_info.serial_number)
-        config = camera_configs.get(serial, camera_configs["317422074281"])  # Default to 81 config
-
-        print(f"\nConfiguring camera {serial}...")
-
-        # Enable Advanced Mode per device
-        adv = rs.rs400_advanced_mode(dev)
-        if not adv.is_enabled():
-            adv.toggle_advanced_mode(True)
-            print(f"  Advanced mode enabled")
-
-        # Find the Stereo Module (depth) sensor
-        stereo = next(
-            s for s in dev.query_sensors() if "Stereo" in s.get_info(rs.camera_info.name)
-        )
-
-        # Find the RGB sensor
-        rgb_sensor = next(
-            (s for s in dev.query_sensors() if "RGB" in s.get_info(rs.camera_info.name)),
-            None
-        )
-
-        # === Depth/Stereo Module Configuration ===
-        # Enable/disable auto exposure
-        stereo.set_option(rs.option.enable_auto_exposure, config["auto_exposure"])
-        print(f"  Depth auto exposure: {'ON' if config['auto_exposure'] else 'OFF'}")
-
-        # Set manual exposure if auto exposure is off
-        if config["auto_exposure"] == 0 and config.get("exposure") is not None:
-            stereo.set_option(rs.option.exposure, config["exposure"])
-            print(f"  Depth exposure: {config['exposure']} µs")
-
-        # Set gain
-        stereo.set_option(rs.option.gain, config["gain"])
-        print(f"  Depth gain: {config['gain']}")
-
-        # Laser power
-        stereo.set_option(rs.option.laser_power, config["laser_power"])
-        print(f"  Laser power: {config['laser_power']} mW")
-
-        # Enable auto white balance for RGB sensor
-        if rgb_sensor:
-            rgb_sensor.set_option(rs.option.enable_auto_white_balance, 1)
-            print(f"  RGB auto white balance: ON")
-
-            # Enable auto exposure for RGB (helps with color consistency)
-            rgb_sensor.set_option(rs.option.enable_auto_exposure, 1)
-            print(f"  RGB auto exposure: ON")
-
-        print(f"  Camera {serial} configured successfully")
-
-# Configure cameras at startup
-configure_realsense_cameras()
 
 try:
     import open3d as o3d
@@ -660,16 +581,23 @@ class RobotFrameMerger:
 def main():
     """Main function - easy to use interface"""
 
-    # Configuration
-    CAMERA_SERIALS = ["317422074281", "327122079374"]
-    CALIB_FILE = "./transforms/transforms.npy"  # Calibration file in CaP folder
-    ICP_FILE = "./transforms/icp_tf.npy"  # Optional ICP file (if it exists)
+    # Load configuration
+    config = load_camera_config()
+    camera_serials = config['camera_serials']
+    calib_config = config['calibration']
+    seg_config = config['segmentation']
+    ws_config = config['workspace_bounds']
 
-    # Segmentation configuration
-    TEXT_PROMPT = "Gray coffee machine"  # What object to segment (set to None to disable segmentation)
+    # Configure cameras
+    configure_realsense_cameras(config)
 
-    # Optional workspace cropping bounds: [min_x, min_y, min_z, max_x, max_y, max_z] in meters
-    WORKSPACE_BOUNDS = [0.15, -0.4, 0.08, 1.0, 0.35, 0.6]
+    TEXT_PROMPT = seg_config['text_prompt']
+
+    # Optional workspace cropping bounds
+    WORKSPACE_BOUNDS = None
+    if ws_config['enabled']:
+        WORKSPACE_BOUNDS = [ws_config['min_x'], ws_config['min_y'], ws_config['min_z'],
+                           ws_config['max_x'], ws_config['max_y'], ws_config['max_z']]
 
     # Initialize segmentation models if text prompt is provided
     sam_generator = None
@@ -683,17 +611,21 @@ def main():
         print(f"Using device: {device}")
 
         print("Loading CLIP model...")
-        clip_model = AutoModel.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K").to(device)
-        clip_processor = AutoProcessor.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
+        clip_model = AutoModel.from_pretrained(seg_config['clip_model']).to(device)
+        clip_processor = AutoProcessor.from_pretrained(seg_config['clip_model'])
         print("CLIP model loaded.")
 
         print("Loading SAM2 model...")
-        sam2_checkpoint = "ckpt/sam2.1_hiera_large.pt"
-        model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+        sam2_checkpoint = seg_config['sam2_checkpoint']
+        model_cfg = seg_config['sam2_model_cfg']
         sam2 = build_sam2(model_cfg, sam2_checkpoint, apply_postprocessing=False, device=device)
         sam_generator = SAM2AutomaticMaskGenerator(
-            model=sam2, points_per_side=32, points_per_batch=128,
-            pred_iou_thresh=0.88, stability_score_thresh=0.95, min_mask_region_area=200.0,
+            model=sam2,
+            points_per_side=seg_config['points_per_side'],
+            points_per_batch=seg_config['points_per_batch'],
+            pred_iou_thresh=seg_config['pred_iou_thresh'],
+            stability_score_thresh=seg_config['stability_score_thresh'],
+            min_mask_region_area=seg_config['min_mask_region_area'],
         )
         print("SAM2 model loaded.")
         print("All models initialized successfully.")
@@ -702,11 +634,12 @@ def main():
         # Initialize merger with implicit unit conversion
         print("Initializing robot frame merger with automatic unit conversion...")
         merger = RobotFrameMerger(
-            camera_serials=CAMERA_SERIALS,
-            calib_file=CALIB_FILE,
-            icp_file=ICP_FILE,
-            calib_units="m",  # Calibration data is in millimeters
-            point_cloud_units="m",  # RealSense outputs meters
+            camera_serials=camera_serials,
+            calib_file=calib_config['transforms_file'],
+            icp_file=calib_config['icp_file'],
+            manual_offset_file=calib_config['manual_offset_file'],
+            calib_units=calib_config['calib_units'],
+            point_cloud_units=calib_config['point_cloud_units'],
             sam_generator=sam_generator,
             clip_model=clip_model,
             clip_processor=clip_processor,

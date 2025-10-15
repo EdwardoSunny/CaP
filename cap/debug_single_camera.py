@@ -212,6 +212,7 @@ def main():
         "--serial",
         type=str,
         default="327122079374",
+        # default="317422074281",
         help="Camera serial number (default: 327122079374)"
     )
     parser.add_argument(

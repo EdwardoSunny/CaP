@@ -1,0 +1,71 @@
+# RealSense Camera Configuration
+# This file contains all camera settings used across the CaP project
+
+# Camera serial numbers
+camera_serials:
+  - "317422074281"
+  - "327122079374"
+
+# Camera-specific depth sensor settings
+camera_settings:
+  "317422074281":
+    auto_exposure: 1         # 1 = enabled, 0 = disabled
+    gain: 64                 # Gain value (16-248)
+    laser_power: 240         # Laser power in mW (0-360)
+    exposure: null           # Not used when auto_exposure is on
+
+  "327122079374":
+    auto_exposure: 1         # 1 = enabled, 0 = disabled
+    exposure: 250 # Exposure time in microseconds (used when auto_exposure = 0)
+    gain: 32 # Gain value (16-248)
+    laser_power: 200 # Laser power in mW (0-360)
+
+# RGB sensor settings (applied to all cameras)
+rgb_settings:
+  enable_auto_white_balance: 1
+  enable_auto_exposure: 1
+
+# Stream configuration
+stream_config:
+  width: 640
+  height: 480
+  fps: 30
+  depth_format: "z16"
+  color_format: "bgr8"
+
+# Point cloud processing
+point_cloud:
+  max_depth: 2.0           # Maximum depth in meters
+  min_depth: 0.01           # Minimum depth in meters
+  max_points: 100000       # Maximum points per camera (for downsampling)
+
+# Calibration file paths
+calibration:
+  transforms_file: "./transforms/transforms.npy"
+  icp_file: "./transforms/icp_tf.npy"
+  manual_offset_file: "./transforms/manual_offset.npy"
+  calib_units: "m"         # Units in calibration file (mm, m, cm, inch)
+  point_cloud_units: "m"   # Units for point cloud output (mm, m, cm, inch)
+
+# Workspace bounds for cropping (optional)
+# Format: [min_x, min_y, min_z, max_x, max_y, max_z] in meters
+workspace_bounds:
+  enabled: false
+  min_x: 0.15
+  min_y: -0.4
+  min_z: 0.08
+  max_x: 1.0
+  max_y: 0.35
+  max_z: 0.6
+
+# Segmentation settings (for segment_pc.py)
+segmentation:
+  text_prompt: "Gray coffee machine"  # Object to segment (null to disable)
+  sam2_checkpoint: "ckpt/sam2.1_hiera_large.pt"
+  sam2_model_cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
+  clip_model: "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
+  points_per_side: 32
+  points_per_batch: 128
+  pred_iou_thresh: 0.88
+  stability_score_thresh: 0.95
+  min_mask_region_area: 200.0
