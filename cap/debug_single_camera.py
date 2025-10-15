@@ -7,6 +7,7 @@ No transformations, just raw camera output.
 import numpy as np
 import pyrealsense2 as rs
 import argparse
+from camera_utils import load_camera_config
 
 try:
     import open3d as o3d
@@ -17,8 +18,14 @@ except ImportError:
     exit(1)
 
 
-def configure_camera(serial_number):
+def configure_camera(serial_number, config=None):
     """Configure a single RealSense camera for better depth quality"""
+    if config is None:
+        config = load_camera_config()
+
+    camera_settings = config['camera_settings']
+    rgb_settings = config['rgb_settings']
+
     ctx = rs.context()
     dev = None
 
@@ -35,6 +42,12 @@ def configure_camera(serial_number):
         return
 
     print(f"\nConfiguring camera {serial_number}...")
+
+    # Get settings for this camera
+    settings = camera_settings.get(serial_number)
+    if not settings:
+        print(f"Warning: No settings found for camera {serial_number} in config")
+        return
 
     # Enable Advanced Mode
     adv = rs.rs400_advanced_mode(dev)
@@ -54,23 +67,26 @@ def configure_camera(serial_number):
     )
 
     # === Depth/Stereo Module Configuration ===
-    stereo.set_option(rs.option.enable_auto_exposure, 0)
+    stereo.set_option(rs.option.enable_auto_exposure, settings['auto_exposure'])
+    print(f"  Depth auto exposure: {'ON' if settings['auto_exposure'] else 'OFF'}")
 
-    # stereo.set_option(rs.option.enable_auto_exposure, 1)
+    if settings['auto_exposure'] == 0 and settings.get('exposure') is not None:
+        stereo.set_option(rs.option.exposure, settings['exposure'])
+        print(f"  Depth exposure: {settings['exposure']} µs")
 
-    stereo.set_option(rs.option.exposure, 500)
+    stereo.set_option(rs.option.gain, settings['gain'])
+    print(f"  Depth gain: {settings['gain']}")
 
-    stereo.set_option(rs.option.gain, 16)
-
-    stereo.set_option(rs.option.laser_power, 320)
+    stereo.set_option(rs.option.laser_power, settings['laser_power'])
+    print(f"  Laser power: {settings['laser_power']} mW")
 
     # Enable auto white balance for RGB sensor
     if rgb_sensor:
-        rgb_sensor.set_option(rs.option.enable_auto_white_balance, 1)
-        print(f"  RGB auto white balance: ON")
+        rgb_sensor.set_option(rs.option.enable_auto_white_balance, rgb_settings['enable_auto_white_balance'])
+        print(f"  RGB auto white balance: {'ON' if rgb_settings['enable_auto_white_balance'] else 'OFF'}")
 
-        rgb_sensor.set_option(rs.option.enable_auto_exposure, 1)
-        print(f"  RGB auto exposure: ON")
+        rgb_sensor.set_option(rs.option.enable_auto_exposure, rgb_settings['enable_auto_exposure'])
+        print(f"  RGB auto exposure: {'ON' if rgb_settings['enable_auto_exposure'] else 'OFF'}")
 
     print(f"  Camera {serial_number} configured successfully\n")
 
