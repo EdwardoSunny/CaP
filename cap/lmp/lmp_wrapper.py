@@ -3,11 +3,16 @@ import numpy as np
 import scipy.spatial.transform as st
 import logging
 from typing import List, Optional, Union, Tuple
+from pathlib import Path
+import torch
 import shapely
 from cap.lmp.lmp import LMP, LMPFGen
 from ril_env.precise_sleep import precise_wait
 from ril_env.xarm_controller import XArmConfig, XArm
 from ril_env.real_env import RealEnv
+
+# Import the updated segmentation API
+from cap.segment_pc import RobotFrameMerger, load_segmentation_models
 
 logger = logging.getLogger(__name__)
 
@@ -40,27 +45,24 @@ class LMPWrapper:
 
         logger.info(f"Robot Primitives initialized. Current pose: {self._current_pose}")
 
-        # INITIALIZE SEGMENTATION MODELS GLOBALLY
+        # Store camera serials for point cloud capture
+        self.camera_serials = camera_serials
+
+        # INITIALIZE SEGMENTATION MODELS GLOBALLY using new API
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Loading segmentation models on {self.device}...")
 
-        print("Loading CLIP model...")
-        self.clip_model = AutoModel.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K").to(device)
-        self.clip_processor = AutoProcessor.from_pretrained("laion/CLIP-ViT-H-14-laion2B-s32B-b79K")
-        print("CLIP model loaded.")
+        # Get project root (assuming lmp is in cap/lmp/)
+        project_root = Path(__file__).parent.parent.parent
 
-        print("Loading SAM2 model...")
-        sam2_checkpoint = "ckpt/sam2.1_hiera_large.pt"
-        model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
-        sam2 = build_sam2(model_cfg, sam2_checkpoint, apply_postprocessing=False, device=device)
-        self.sam_generator = SAM2AutomaticMaskGenerator(
-            model=sam2, points_per_side=32, points_per_batch=128,
-            pred_iou_thresh=0.88, stability_score_thresh=0.95, min_mask_region_area=200.0,
+        # Load models using the new API
+        self.sam_generator, self.clip_model, self.clip_processor = load_segmentation_models(
+            sam2_checkpoint=project_root / "ckpt" / "sam2.1_hiera_large.pt",
+            sam2_config=project_root / "configs" / "sam2.1" / "sam2.1_hiera_l.yaml",
+            clip_model_name="laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+            device=self.device
         )
-        print("SAM2 model loaded.")
-        print("All models initialized successfully.")
-        
-
-        self.merger = SegmentedPointCloudMerger(camera_serials=camera_serials, calib_units="mm", point_cloud_units="m")
+        print("All segmentation models initialized successfully.")
 
     def _setup_lmp_environment(self):
         """Setup LMP-specific environment variables and object tracking."""
@@ -105,11 +107,62 @@ class LMPWrapper:
             "gray": (0.5, 0.5, 0.5, 1.0),
         }
 
-    def detect_object_location(prompt):
-        merged_points, merged_colors = merger.capture_merged_segmented_pointcloud(
-            text_prompt=prompt, sam_gen=self.sam_generator,
-            clip_mod=self.clip_model, clip_proc=self.clip_processor, device_str=self.device
+    def detect_object_location(self, prompt):
+        """
+        Detect and segment an object in the scene using text prompt.
+
+        Args:
+            prompt: Text description of object to find (e.g., "cup", "bottle")
+
+        Returns:
+            tuple: (merged_points, merged_colors) - Segmented point cloud in robot frame
+        """
+        # Get project root for paths
+        project_root = Path(__file__).parent.parent.parent
+
+        # Create merger with segmentation models
+        merger = RobotFrameMerger(
+            camera_serials=self.camera_serials,
+            calib_file=project_root / "transforms" / "transforms.npy",
+            max_depth=2.0,
+            min_depth=0.1,
+            sam_generator=self.sam_generator,
+            clip_model=self.clip_model,
+            clip_processor=self.clip_processor,
+            device=self.device,
         )
+
+        # Capture with segmentation
+        merged_points, merged_colors = merger.capture_merged_pointcloud(
+            text_prompt=prompt
+        )
+
+        # Cleanup
+        merger.cleanup()
+
+        return merged_points, merged_colors
+
+    def get_object_center(self, prompt):
+        """
+        Get the center position of a segmented object.
+
+        Args:
+            prompt: Text description of object to find
+
+        Returns:
+            np.array: [x, y, z] center position of object in robot frame, or None if not found
+        """
+        points, colors = self.detect_object_location(prompt)
+
+        if points is None or len(points) == 0:
+            logger.warning(f"No points found for object: {prompt}")
+            return None
+
+        # Calculate centroid
+        center = np.mean(points, axis=0)
+        logger.info(f"Object '{prompt}' center at: {center}")
+
+        return center
 
     def get_robot_pos(self):
         """Return robot end-effector xyz position in robot base frame."""
@@ -375,27 +428,40 @@ class LMPWrapper:
         """Check if object is visible/known."""
         return obj_name in self.known_objects
 
-    def get_obj_pos(self, obj_name):
+    def get_obj_pos(self, obj_name, use_segmentation=True):
         """
-        Get object position. You'll need to implement actual object detection.
-        For now, returns mock positions or corner/side positions.
+        Get object position using segmentation or predefined positions.
 
         Args:
             obj_name: Name of object or position reference
+            use_segmentation: If True, use AI segmentation to find object (default: True)
 
         Returns:
             np.array: [x, y, z] position
         """
-        obj_name = obj_name.replace("the", "").replace("_", " ").strip()
+        obj_name_clean = obj_name.replace("the", "").replace("_", " ").strip()
 
-        if obj_name in self.corner_positions:
-            return list(self.corner_positions[obj_name])
-        elif obj_name in self.side_positions:
-            return list(self.side_positions[obj_name])
-        else:
-            # TODO: Replace with actual object detection/tracking
-            logger.warning(f"Mock position returned for {obj_name}")
-            return [0.0, -0.5, 0.0]
+        # Check if it's a predefined position first
+        if obj_name_clean in self.corner_positions:
+            return list(self.corner_positions[obj_name_clean])
+        elif obj_name_clean in self.side_positions:
+            return list(self.side_positions[obj_name_clean])
+
+        # Use segmentation to find the object
+        if use_segmentation:
+            try:
+                logger.info(f"Using segmentation to locate: {obj_name_clean}")
+                center = self.get_object_center(obj_name_clean)
+                if center is not None:
+                    return center.tolist()
+                else:
+                    logger.warning(f"Segmentation failed for {obj_name_clean}, using default position")
+            except Exception as e:
+                logger.error(f"Error during segmentation for {obj_name_clean}: {e}")
+
+        # Fallback to mock position
+        logger.warning(f"Mock position returned for {obj_name_clean}")
+        return [0.0, -0.5, 0.0]
 
     def get_bbox(self, obj_name):
         """

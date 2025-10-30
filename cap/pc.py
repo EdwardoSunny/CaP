@@ -7,7 +7,12 @@ This is the clean, production-ready version for getting a single merged point cl
 import numpy as np
 import pyrealsense2 as rs
 import os
-from camera_exposure_config import DEPTH_EXPOSURE, RGB_EXPOSURE
+
+# Handle both package import and direct script execution
+try:
+    from .camera_exposure_config import DEPTH_EXPOSURE, RGB_EXPOSURE
+except ImportError:
+    from camera_exposure_config import DEPTH_EXPOSURE, RGB_EXPOSURE
 
 try:
     import open3d as o3d
@@ -24,20 +29,30 @@ class RobotFrameMerger:
     def __init__(
         self,
         camera_serials,
-        calib_file="../transforms/transforms.npy",
+        calib_file,
         max_depth=2.0,
         min_depth=0.1,
     ):
+        """
+        Initialize RobotFrameMerger
+
+        Args:
+            camera_serials: List of camera serial numbers
+            calib_file: Path to calibration transforms file (transforms.npy)
+            max_depth: Maximum depth in meters (default: 2.0)
+            min_depth: Minimum depth in meters (default: 0.1)
+        """
         self.camera_serials = camera_serials
         self.cameras = {}
         self.max_depth = max_depth
         self.min_depth = min_depth
 
         # Load calibration transforms
-        if not os.path.exists(calib_file):
-            raise FileNotFoundError(f"Calibration file {calib_file} not found!")
+        calib_path = str(calib_file)  # Handle both str and Path objects
+        if not os.path.exists(calib_path):
+            raise FileNotFoundError(f"Calibration file {calib_path} not found!")
 
-        self.transforms = np.load(calib_file, allow_pickle=True).item()
+        self.transforms = np.load(calib_path, allow_pickle=True).item()
         print(f"Loaded transforms for cameras: {list(self.transforms.keys())}")
 
         # Initialize cameras
@@ -331,13 +346,30 @@ class RobotFrameMerger:
 
 
 def main():
-    """Main function - easy to use interface"""
+    """
+    Main function - example usage when running as standalone script
 
-    # Hardcoded camera serials - edit these for your setup
+    When importing as a package, create RobotFrameMerger directly with your paths:
+
+        from cap.pc import RobotFrameMerger
+
+        merger = RobotFrameMerger(
+            camera_serials=["327122079374", "317422074281"],
+            calib_file="transforms/transforms.npy",
+            max_depth=2.0,
+            min_depth=0.1,
+        )
+    """
+    import sys
+    from pathlib import Path
+
+    # When run as script from cap/ directory, paths are relative to parent
+    script_dir = Path(__file__).parent
+    project_root = script_dir.parent
+
+    # Configuration
     camera_serials = ["327122079374", "317422074281"]
-    calib_file = "../transforms/transforms.npy"
-
-    # Depth range settings
+    calib_file = project_root / "transforms" / "transforms.npy"
     max_depth = 2.0  # meters
     min_depth = 0.1  # meters
 

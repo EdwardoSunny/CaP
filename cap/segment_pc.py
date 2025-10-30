@@ -11,7 +11,12 @@ import sys
 import time
 import torch
 from PIL import Image
-from camera_exposure_config import DEPTH_EXPOSURE, RGB_EXPOSURE
+
+# Handle both package import and direct script execution
+try:
+    from .camera_exposure_config import DEPTH_EXPOSURE, RGB_EXPOSURE
+except ImportError:
+    from camera_exposure_config import DEPTH_EXPOSURE, RGB_EXPOSURE
 
 # Add SAM2 to path
 sys.path.insert(
@@ -71,7 +76,7 @@ class RobotFrameMerger:
     def __init__(
         self,
         camera_serials,
-        calib_file="../transforms/transforms.npy",
+        calib_file,
         max_depth=2.0,
         min_depth=0.1,
         sam_generator=None,
@@ -79,6 +84,19 @@ class RobotFrameMerger:
         clip_processor=None,
         device="cuda",
     ):
+        """
+        Initialize RobotFrameMerger with segmentation support
+
+        Args:
+            camera_serials: List of camera serial numbers
+            calib_file: Path to calibration transforms file (transforms.npy)
+            max_depth: Maximum depth in meters (default: 2.0)
+            min_depth: Minimum depth in meters (default: 0.1)
+            sam_generator: SAM2 mask generator (optional, for segmentation)
+            clip_model: CLIP model (optional, for segmentation)
+            clip_processor: CLIP processor (optional, for segmentation)
+            device: Device for models ('cuda' or 'cpu')
+        """
         self.camera_serials = camera_serials
         self.cameras = {}
         self.max_depth = max_depth
@@ -91,10 +109,11 @@ class RobotFrameMerger:
         self.device = device
 
         # Load calibration transforms
-        if not os.path.exists(calib_file):
-            raise FileNotFoundError(f"Calibration file {calib_file} not found!")
+        calib_path = str(calib_file)  # Handle both str and Path objects
+        if not os.path.exists(calib_path):
+            raise FileNotFoundError(f"Calibration file {calib_path} not found!")
 
-        self.transforms = np.load(calib_file, allow_pickle=True).item()
+        self.transforms = np.load(calib_path, allow_pickle=True).item()
         print(f"Loaded transforms for cameras: {list(self.transforms.keys())}")
 
         # Initialize cameras
@@ -426,24 +445,88 @@ class RobotFrameMerger:
         print("All cameras stopped")
 
 
+def load_segmentation_models(sam2_checkpoint, sam2_config, clip_model_name, device="cuda"):
+    """
+    Load SAM2 and CLIP models for segmentation
+
+    Args:
+        sam2_checkpoint: Path to SAM2 checkpoint file
+        sam2_config: Path to SAM2 config YAML file
+        clip_model_name: HuggingFace model name for CLIP
+        device: Device to load models on ('cuda' or 'cpu')
+
+    Returns:
+        tuple: (sam_generator, clip_model, clip_processor)
+    """
+    print("Loading CLIP model...")
+    clip_model = AutoModel.from_pretrained(clip_model_name).to(device)
+    clip_processor = AutoProcessor.from_pretrained(clip_model_name)
+    print("CLIP model loaded.")
+
+    print("Loading SAM2 model...")
+    sam2 = build_sam2(
+        str(sam2_config), str(sam2_checkpoint), apply_postprocessing=False, device=device
+    )
+    sam_generator = SAM2AutomaticMaskGenerator(
+        model=sam2,
+        points_per_side=32,
+        points_per_batch=128,
+        pred_iou_thresh=0.88,
+        stability_score_thresh=0.95,
+        min_mask_region_area=200.0,
+    )
+    print("SAM2 model loaded.")
+
+    return sam_generator, clip_model, clip_processor
+
+
 def main():
-    """Main function - easy to use interface"""
+    """
+    Main function - example usage when running as standalone script
 
-    # Hardcoded camera serials - edit these for your setup
+    When importing as a package, use load_segmentation_models() and RobotFrameMerger:
+
+        from pathlib import Path
+        from cap.segment_pc import RobotFrameMerger, load_segmentation_models
+
+        # Load segmentation models
+        sam_gen, clip_model, clip_proc = load_segmentation_models(
+            sam2_checkpoint=Path("ckpt/sam2.1_hiera_large.pt"),
+            sam2_config=Path("configs/sam2.1/sam2.1_hiera_l.yaml"),
+            clip_model_name="laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+            device="cuda"
+        )
+
+        # Create merger
+        merger = RobotFrameMerger(
+            camera_serials=["327122079374", "317422074281"],
+            calib_file=Path("transforms/transforms.npy"),
+            sam_generator=sam_gen,
+            clip_model=clip_model,
+            clip_processor=clip_proc,
+            device="cuda"
+        )
+
+        # Capture with segmentation
+        points, colors = merger.capture_merged_pointcloud(text_prompt="cup")
+    """
+    from pathlib import Path
+
+    # When run as script from cap/ directory, paths are relative to parent
+    script_dir = Path(__file__).parent
+    project_root = script_dir.parent
+
+    # Configuration
     camera_serials = ["327122079374", "317422074281"]
-    calib_file = "../transforms/transforms.npy"
-
-    # Depth range settings
+    calib_file = project_root / "transforms" / "transforms.npy"
     max_depth = 2.0  # meters
     min_depth = 0.1  # meters
 
-    # Segmentation prompt (set this to what you want to segment, or None to disable)
-    TEXT_PROMPT = "Orange disinfecting wipes"
-
-    # Segmentation model settings
-    SAM2_CHECKPOINT = "ckpt/sam2.1_hiera_large.pt"
-    SAM2_MODEL_CFG = "configs/sam2.1/sam2.1_hiera_l.yaml"  # Path relative to parent directory
-    CLIP_MODEL = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
+    # Segmentation settings
+    TEXT_PROMPT = "Orange disinfecting wipes"  # Set to None to disable segmentation
+    sam2_checkpoint = project_root / "ckpt" / "sam2.1_hiera_large.pt"
+    sam2_config = project_root / "configs" / "sam2.1" / "sam2.1_hiera_l.yaml"
+    clip_model_name = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
 
     print(f"Camera serials: {camera_serials}")
     print(f"Calibration file: {calib_file}")
@@ -468,29 +551,12 @@ def main():
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {device}")
 
-        print("Loading CLIP model...")
-        clip_model = AutoModel.from_pretrained(CLIP_MODEL).to(device)
-        clip_processor = AutoProcessor.from_pretrained(CLIP_MODEL)
-        print("CLIP model loaded.")
-
-        print("Loading SAM2 model...")
-        # Change to parent directory temporarily for SAM2 to find configs
-        import os
-        original_dir = os.getcwd()
-        os.chdir("..")
-        sam2 = build_sam2(
-            SAM2_MODEL_CFG, SAM2_CHECKPOINT, apply_postprocessing=False, device=device
+        sam_generator, clip_model, clip_processor = load_segmentation_models(
+            sam2_checkpoint=sam2_checkpoint,
+            sam2_config=sam2_config,
+            clip_model_name=clip_model_name,
+            device=device
         )
-        os.chdir(original_dir)
-        sam_generator = SAM2AutomaticMaskGenerator(
-            model=sam2,
-            points_per_side=32,
-            points_per_batch=128,
-            pred_iou_thresh=0.88,
-            stability_score_thresh=0.95,
-            min_mask_region_area=200.0,
-        )
-        print("SAM2 model loaded.")
         print("All models initialized successfully.")
 
     try:
