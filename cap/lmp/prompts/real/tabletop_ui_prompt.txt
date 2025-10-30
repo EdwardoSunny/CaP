@@ -199,8 +199,51 @@ put_first_on_second('red block', farthest_bowl_name)
 
 # move the arm up by 10cm
 say('Raising the arm up by 10 centimeters')
-move_up(distance=10.0) 
+move_up(distance=10.0)
 
 # move the arm down by 10cm
 say('Lowering the arm down by 10 centimeters')
 move_down(distance=10.0)
+
+objects = ['orange disinfecting wipes', 'cup', 'bottle']
+# move to the orange disinfecting wipes
+say('Moving to the orange disinfecting wipes')
+wipes_pos = get_obj_pos('orange disinfecting wipes')
+goto_pos(wipes_pos)
+
+objects = ['red cup', 'blue bottle', 'green marker']
+# go to the cup
+say('Going to the red cup')
+cup_position = get_obj_pos('red cup')
+goto_pos(cup_position)
+
+objects = ['keyboard', 'mouse', 'monitor']
+# move above the keyboard
+say('Moving 5cm above the keyboard')
+keyboard_pos = get_obj_pos('keyboard')
+above_keyboard = [keyboard_pos[0], keyboard_pos[1], keyboard_pos[2] + 0.05]
+goto_pos(above_keyboard)
+
+objects = ['orange disinfecting wipes', 'blue towel', 'green spray bottle']
+# detect and pick up the wipes
+say('Detecting and picking up the orange disinfecting wipes')
+wipes_pos = get_obj_pos('orange disinfecting wipes')
+# Move above the object first
+approach_pos = [wipes_pos[0], wipes_pos[1], wipes_pos[2] + 0.10]
+goto_pos(approach_pos)
+# Open gripper
+open_gripper()
+# Move down to grasp
+goto_pos(wipes_pos)
+# Close gripper to grasp
+close_gripper()
+# Move up with object
+move_up(distance=10.0)
+
+objects = ['bottle', 'box', 'tape']
+# go to the bottle and move 10cm to the right
+say('Going to the bottle and moving 10cm right')
+bottle_pos = get_obj_pos('bottle')
+goto_pos(bottle_pos)
+right_of_bottle = [bottle_pos[0] + 0.10, bottle_pos[1], bottle_pos[2]]
+goto_pos(right_of_bottle)

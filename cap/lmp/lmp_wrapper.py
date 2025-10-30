@@ -2,6 +2,7 @@ import time
 import numpy as np
 import scipy.spatial.transform as st
 import logging
+import traceback
 from typing import List, Optional, Union, Tuple
 from pathlib import Path
 import torch
@@ -11,14 +12,14 @@ from ril_env.precise_sleep import precise_wait
 from ril_env.xarm_controller import XArmConfig, XArm
 from ril_env.real_env import RealEnv
 
-# Import the updated segmentation API
-from cap.segment_pc import RobotFrameMerger, load_segmentation_models
+# Import the segmentation model loading function
+from cap.segment_pc import load_segmentation_models
 
 logger = logging.getLogger(__name__)
 
 
 class LMPWrapper:
-    def __init__(self, env, xarm_config, frequency=30, command_latency=0.01, camera_serials=["317422074281", "317422075456"]):
+    def __init__(self, env, xarm_config, frequency=30, command_latency=0.01, camera_serials=["327122079374", "317422074281"]):
         """
         Initialize robot primitives using teleop script's exact components.
 
@@ -114,6 +115,7 @@ class LMPWrapper:
     def detect_object_location(self, prompt):
         """
         Detect and segment an object in the scene using text prompt.
+        Uses RobotFrameMerger from segment_pc.py directly - NO CHANGES to segment_pc.py logic.
 
         Args:
             prompt: Text description of object to find (e.g., "cup", "bottle")
@@ -121,10 +123,12 @@ class LMPWrapper:
         Returns:
             tuple: (merged_points, merged_colors) - Segmented point cloud in robot frame
         """
+        from cap.segment_pc import RobotFrameMerger
+
         # Get project root for paths
         project_root = Path(__file__).parent.parent.parent
 
-        # Create merger with segmentation models
+        # Create RobotFrameMerger with the EXACT same initialization as segment_pc.py
         merger = RobotFrameMerger(
             camera_serials=self.camera_serials,
             calib_file=project_root / "transforms" / "transforms.npy",
@@ -136,15 +140,19 @@ class LMPWrapper:
             device=self.device,
         )
 
-        # Capture with segmentation
-        merged_points, merged_colors = merger.capture_merged_pointcloud(
-            text_prompt=prompt
-        )
+        try:
+            # Use EXACT same method as segment_pc.py - capture with segmentation
+            merged_points, merged_colors = merger.capture_merged_pointcloud(
+                text_prompt=prompt
+            )
 
-        # Cleanup
-        merger.cleanup()
+            logger.info(f"Merged point cloud: {len(merged_points) if merged_points is not None else 0} total points")
 
-        return merged_points, merged_colors
+            return merged_points, merged_colors
+
+        finally:
+            # Always cleanup cameras
+            merger.cleanup()
 
     def get_object_center(self, prompt, top_percentile=10, use_cache=True):
         """
@@ -497,6 +505,7 @@ class LMPWrapper:
                     logger.warning(f"Segmentation failed for {obj_name_clean}, using default position")
             except Exception as e:
                 logger.error(f"Error during segmentation for {obj_name_clean}: {e}")
+                logger.error(traceback.format_exc())
 
         # Fallback to mock position
         logger.warning(f"Mock position returned for {obj_name_clean}")

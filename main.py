@@ -47,6 +47,7 @@ def main(
             video_crf=21,
             enable_multi_cam_vis=False,  # Totally broken RN
             multi_cam_vis_resolution=(1280, 720),
+            enable_cameras=False,  # Cameras handled separately by segment_pc.py
             shm_manager=shm_manager,
         ) as env:
             logger.info("System initialized")
