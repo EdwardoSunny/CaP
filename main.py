@@ -61,10 +61,16 @@ def main(
             logger.info("Init Success")
             logger.info("=" * 60)
 
+            # lmp_tabletop_ui(
+            #     "Move to the orange disinfecting wipes",
+            #     f"objects = {lmp_env.get_obj_names()}",
+            # )
+
             lmp_tabletop_ui(
-                "Move to the orange disinfecting wipes",
+                "Move to the orange bread",
                 f"objects = {lmp_env.get_obj_names()}",
             )
+
 
             logger.info("Movement complete!")
 
