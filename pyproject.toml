@@ -13,6 +13,8 @@ dependencies = [
     "diffusers==0.11.1",
     "einops>=0.8.1",
     "huggingface-hub==0.25.2",
+    "ipython>=8.37.0",
+    "meshcat>=0.3.2",
     "numpy>=2.2.6",
     "open3d>=0.19.0",
     "openai>=1.99.1",

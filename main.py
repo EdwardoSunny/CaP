@@ -49,24 +49,23 @@ def main(
             multi_cam_vis_resolution=(1280, 720),
             shm_manager=shm_manager,
         ) as env:
-            logger.info("Configuring camera settings...")
-            env.realsense.set_exposure(exposure=120, gain=0)
-            env.realsense.set_white_balance(white_balance=5900)
-            time.sleep(1)
             logger.info("System initialized")
+            # Note: Camera settings are configured via cap/camera_exposure_config.py
+            time.sleep(1)
 
-            config = load_config("cap/config/real_config.yaml")
+            config = load_config("configs/real_config.yaml")
             lmp_tabletop_ui, lmp_env = setup_LMP(config, env, xarm_config)
-            # lmp_env.close_gripper()
-            # time.sleep(1)
-            # lmp_env.open_gripper()
 
-            lmp_env.update_object_list(["red block", "blue bowl"])
+            logger.info("=" * 60)
+            logger.info("Init Success")
+            logger.info("=" * 60)
+
             lmp_tabletop_ui(
-                "Move up by 20 cm and close the gripper, wait 1 second, then open it again, then move back down",
+                "Move to the orange disinfecting wipes",
                 f"objects = {lmp_env.get_obj_names()}",
             )
 
+            logger.info("Movement complete!")
 
 if __name__ == "__main__":
     main()

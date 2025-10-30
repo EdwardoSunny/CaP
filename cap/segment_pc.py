@@ -451,7 +451,7 @@ def load_segmentation_models(sam2_checkpoint, sam2_config, clip_model_name, devi
 
     Args:
         sam2_checkpoint: Path to SAM2 checkpoint file
-        sam2_config: Path to SAM2 config YAML file
+        sam2_config: Path to SAM2 config YAML file (or just "sam2.1/sam2.1_hiera_l")
         clip_model_name: HuggingFace model name for CLIP
         device: Device to load models on ('cuda' or 'cpu')
 
@@ -464,9 +464,48 @@ def load_segmentation_models(sam2_checkpoint, sam2_config, clip_model_name, devi
     print("CLIP model loaded.")
 
     print("Loading SAM2 model...")
-    sam2 = build_sam2(
-        str(sam2_config), str(sam2_checkpoint), apply_postprocessing=False, device=device
-    )
+
+    # Handle both Path objects and strings, convert to proper format for build_sam2
+    from pathlib import Path
+    sam2_config_path = Path(sam2_config)
+    sam2_checkpoint_path = Path(sam2_checkpoint)
+
+    # If given an absolute/relative path, need to change directory for Hydra
+    if sam2_config_path.is_absolute() or str(sam2_config_path).startswith('..'):
+        # Need to use the config relative to CaP root
+        # Extract just the config name for Hydra
+        original_dir = os.getcwd()
+
+        # Find project root (CaP/) - go up from configs/sam2.1/xxx.yaml
+        if sam2_config_path.is_absolute():
+            # Path like: /home/.../CaP/configs/sam2.1/sam2.1_hiera_l.yaml
+            # We want:   /home/.../CaP/
+            config_root = sam2_config_path.parent.parent.parent  # .../sam2.1_hiera_l.yaml -> sam2.1/ -> configs/ -> CaP/
+        else:
+            # Relative path like: ../configs/sam2.1/sam2.1_hiera_l.yaml
+            config_root = Path(original_dir) / sam2_config_path.parent.parent.parent
+            config_root = config_root.resolve()
+
+        os.chdir(config_root)
+
+        # Use relative config path from CaP root
+        # configs/sam2.1/sam2.1_hiera_l.yaml -> sam2.1/sam2.1_hiera_l
+        config_name = f"{sam2_config_path.parent.name}/{sam2_config_path.stem}"
+
+        # Checkpoint path relative to CaP root
+        # /home/.../CaP/ckpt/sam2.1_hiera_large.pt -> ckpt/sam2.1_hiera_large.pt
+        checkpoint_path = str(sam2_checkpoint_path.relative_to(config_root))
+
+        sam2 = build_sam2(
+            config_name, checkpoint_path, apply_postprocessing=False, device=device
+        )
+
+        os.chdir(original_dir)
+    else:
+        # Already in correct format
+        sam2 = build_sam2(
+            str(sam2_config), str(sam2_checkpoint), apply_postprocessing=False, device=device
+        )
     sam_generator = SAM2AutomaticMaskGenerator(
         model=sam2,
         points_per_side=32,

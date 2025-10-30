@@ -48,6 +48,9 @@ class LMPWrapper:
         # Store camera serials for point cloud capture
         self.camera_serials = camera_serials
 
+        # Cache for detected objects (to avoid re-capturing for same command)
+        self._detection_cache = {}  # {obj_name: (points, colors, center)}
+
         # INITIALIZE SEGMENTATION MODELS GLOBALLY using new API
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Loading segmentation models on {self.device}...")
@@ -56,9 +59,10 @@ class LMPWrapper:
         project_root = Path(__file__).parent.parent.parent
 
         # Load models using the new API
+        # Use SAM2's internal config (no path, just name) to avoid Hydra path issues
         self.sam_generator, self.clip_model, self.clip_processor = load_segmentation_models(
-            sam2_checkpoint=project_root / "ckpt" / "sam2.1_hiera_large.pt",
-            sam2_config=project_root / "configs" / "sam2.1" / "sam2.1_hiera_l.yaml",
+            sam2_checkpoint=str(project_root / "ckpt" / "sam2.1_hiera_large.pt"),
+            sam2_config="sam2.1/sam2.1_hiera_l",  # Use SAM2 package's internal config
             clip_model_name="laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
             device=self.device
         )
@@ -142,27 +146,62 @@ class LMPWrapper:
 
         return merged_points, merged_colors
 
-    def get_object_center(self, prompt):
+    def get_object_center(self, prompt, top_percentile=10, use_cache=True):
         """
-        Get the center position of a segmented object.
+        Get the center position of a segmented object's top surface.
+        This is better for grasping since you want to approach from above.
 
         Args:
             prompt: Text description of object to find
+            top_percentile: Percentage of top points to consider (default: 10 = top 10%)
+            use_cache: If True, use cached detection if available (default: True)
 
         Returns:
-            np.array: [x, y, z] center position of object in robot frame, or None if not found
+            np.array: [x, y, z] center position on top surface in robot frame, or None if not found
         """
+        # Check cache first
+        if use_cache and prompt in self._detection_cache:
+            logger.info(f"Using cached detection for '{prompt}'")
+            return self._detection_cache[prompt]['center']
+
+        # Detect object
         points, colors = self.detect_object_location(prompt)
 
         if points is None or len(points) == 0:
             logger.warning(f"No points found for object: {prompt}")
             return None
 
-        # Calculate centroid
-        center = np.mean(points, axis=0)
-        logger.info(f"Object '{prompt}' center at: {center}")
+        # Get the top surface points (top percentile of Z values)
+        z_threshold = np.percentile(points[:, 2], 100 - top_percentile)
+        top_points = points[points[:, 2] >= z_threshold]
+
+        if len(top_points) == 0:
+            logger.warning(f"No top surface points found for: {prompt}")
+            # Fallback to simple centroid
+            center = np.mean(points, axis=0)
+        else:
+            # Get XY center of top surface
+            center_xy = np.mean(top_points[:, :2], axis=0)
+            # Z is the highest point
+            center_z = np.max(points[:, 2])
+            center = np.array([center_xy[0], center_xy[1], center_z])
+
+        logger.info(f"Object '{prompt}' top surface center at: {center}")
+        logger.info(f"  Total points: {len(points)}, Top surface points: {len(top_points) if len(top_points) > 0 else 0}")
+
+        # Cache the result
+        self._detection_cache[prompt] = {
+            'points': points,
+            'colors': colors,
+            'center': center
+        }
 
         return center
+
+    def clear_detection_cache(self):
+        """Clear the detection cache. Call this when objects move or scene changes."""
+        self._detection_cache.clear()
+        logger.info("Detection cache cleared")
 
     def get_robot_pos(self):
         """Return robot end-effector xyz position in robot base frame."""
