@@ -154,15 +154,17 @@ class LMPWrapper:
             # Always cleanup cameras
             merger.cleanup()
 
-    def get_object_center(self, prompt, top_percentile=10, use_cache=True):
+    def get_object_center(self, prompt, top_percentile=10, use_cache=True, visualize=True):
         """
         Get the center position of a segmented object's top surface.
+        Uses EXACT same logic as test_lmp_detection.py.
         This is better for grasping since you want to approach from above.
 
         Args:
             prompt: Text description of object to find
             top_percentile: Percentage of top points to consider (default: 10 = top 10%)
             use_cache: If True, use cached detection if available (default: True)
+            visualize: If True, visualize the point cloud with center marker (default: True)
 
         Returns:
             np.array: [x, y, z] center position on top surface in robot frame, or None if not found
@@ -194,17 +196,81 @@ class LMPWrapper:
             center_z = np.max(points[:, 2])
             center = np.array([center_xy[0], center_xy[1], center_z])
 
-        logger.info(f"Object '{prompt}' top surface center at: {center}")
+        logger.info(f"Object '{prompt}' top surface center at: {center} (meters)")
         logger.info(f"  Total points: {len(points)}, Top surface points: {len(top_points) if len(top_points) > 0 else 0}")
 
-        # Cache the result
+        # Visualize if requested (same as test_lmp_detection.py)
+        if visualize:
+            self._visualize_detection(points, colors, center, prompt)
+
+        # Convert from meters to millimeters for robot commands
+        # Robot expects positions in mm, but detection returns in meters
+        center_mm = center * 1000.0
+
+        logger.info(f"Object '{prompt}' center converted to: {center_mm} (millimeters)")
+
+        # Cache the result (in millimeters for robot use)
         self._detection_cache[prompt] = {
             'points': points,
             'colors': colors,
-            'center': center
+            'center': center_mm
         }
 
-        return center
+        return center_mm
+
+    def _visualize_detection(self, points, colors, center, prompt):
+        """
+        Visualize point cloud with center marker.
+        Same visualization as test_lmp_detection.py for debugging.
+
+        Args:
+            points: Nx3 numpy array of 3D points
+            colors: Nx3 numpy array of RGB colors
+            center: [x, y, z] center position
+            prompt: Object description for window title
+        """
+        try:
+            import open3d as o3d
+        except ImportError:
+            logger.warning("Open3D not available. Skipping visualization.")
+            return
+
+        logger.info(f"\n👁️  Opening visualization for '{prompt}'...")
+        logger.info("📍 Object Center Calculation:")
+        logger.info(f"   Total points: {len(points)}")
+        logger.info(f"   Center position: [{center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f}]")
+
+        # Create point cloud
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        # Create coordinate frame at robot origin
+        robot_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+
+        # Create red sphere at center position
+        center_marker = o3d.geometry.TriangleMesh.create_sphere(radius=0.02)
+        center_marker.paint_uniform_color([1.0, 0.0, 0.0])  # Red
+        center_marker.translate(center)
+
+        # Create small coordinate frame at center
+        center_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
+        center_frame.translate(center)
+
+        logger.info("🎨 Visualization Guide:")
+        logger.info("   - WHITE/RGB points: Segmented object")
+        logger.info("   - RED sphere: Calculated grasp center")
+        logger.info("   - Large RGB axes: Robot origin")
+        logger.info("   - Small RGB axes: Object center")
+        logger.info("\nClose the window to continue...")
+
+        # Visualize
+        o3d.visualization.draw_geometries(
+            [pcd, robot_frame, center_marker, center_frame],
+            window_name=f"LMP Detection - {prompt} - Center at [{center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f}]",
+            width=1280,
+            height=720,
+        )
 
     def clear_detection_cache(self):
         """Clear the detection cache. Call this when objects move or scene changes."""
