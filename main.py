@@ -67,7 +67,7 @@ def main(
             # )
 
             lmp_tabletop_ui(
-                "Move to the orange bread",
+                "Move to the orange cleaning wipes",
                 f"objects = {lmp_env.get_obj_names()}",
             )
 
