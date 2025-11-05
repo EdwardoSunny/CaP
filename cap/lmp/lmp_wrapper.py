@@ -460,10 +460,12 @@ class LMPWrapper:
         Shows:
         - Object point cloud
         - Robot base coordinate frame (large)
-        - Grasp pose coordinate frame (LARGER - clearly shows rotation)
+        - Current robot pose coordinate frame (medium - shows where robot IS NOW)
+        - Grasp pose coordinate frame (LARGER - clearly shows rotation and target pose)
         - Approach arrow showing gripper direction
 
         This lets us verify the grasp is in the correct frame, position, AND orientation.
+        Also shows current robot position for comparison.
 
         Args:
             points: Nx3 numpy array of object points in robot frame
@@ -500,6 +502,13 @@ class LMPWrapper:
         logger.info(f"\n🤖 Current Robot Pose:")
         logger.info(f"   Robot position: [{current_robot_pos[0]:.3f}, {current_robot_pos[1]:.3f}, {current_robot_pos[2]:.3f}] meters")
         logger.info(f"   Robot orientation (RPY): [{current_robot_ori[0]:.1f}, {current_robot_ori[1]:.1f}, {current_robot_ori[2]:.1f}] degrees")
+
+        # Calculate distance and rotation difference
+        distance_to_grasp = np.linalg.norm(grasp_pos - current_robot_pos)
+        logger.info(f"\n📏 Movement Required:")
+        logger.info(f"   Distance to grasp: {distance_to_grasp:.3f} meters")
+        logger.info(f"   Delta position: [{grasp_pos[0]-current_robot_pos[0]:.3f}, {grasp_pos[1]-current_robot_pos[1]:.3f}, {grasp_pos[2]-current_robot_pos[2]:.3f}] meters")
+        logger.info(f"   Delta orientation: [{euler_deg[0]-current_robot_ori[0]:.1f}, {euler_deg[1]-current_robot_ori[1]:.1f}, {euler_deg[2]-current_robot_ori[2]:.1f}] degrees")
 
         # Create point cloud
         pcd = o3d.geometry.PointCloud()
@@ -554,7 +563,7 @@ class LMPWrapper:
         grasp_marker.paint_uniform_color([1.0, 0.0, 1.0])  # Magenta
         grasp_marker.translate(grasp_pos)
 
-        # Create gripper fingers visualization (simplified)
+        # Create gripper fingers visualization at GRASP pose (simplified)
         finger_width = 0.08
         finger_thickness = 0.01
         finger_length = 0.04
@@ -579,26 +588,56 @@ class LMPWrapper:
         right_finger_transform[:3, 3] = grasp_pos - grasp_rot[:, 0] * 0.04  # Offset along -X
         right_finger.transform(right_finger_transform)
 
+        # Create current gripper fingers visualization at CURRENT robot pose
+        current_left_finger = o3d.geometry.TriangleMesh.create_box(
+            width=finger_thickness, height=finger_width, depth=finger_length
+        )
+        current_left_finger.paint_uniform_color([0.8, 0.5, 0.2])  # Orange-ish
+        current_left_finger_transform = np.eye(4)
+        current_left_finger_transform[:3, :3] = current_robot_rot.as_matrix()
+        current_left_finger_transform[:3, 3] = current_robot_pos + current_robot_rot.as_matrix()[:, 0] * 0.04
+        current_left_finger.transform(current_left_finger_transform)
+
+        # Right finger (current)
+        current_right_finger = o3d.geometry.TriangleMesh.create_box(
+            width=finger_thickness, height=finger_width, depth=finger_length
+        )
+        current_right_finger.paint_uniform_color([0.8, 0.5, 0.2])  # Orange-ish
+        current_right_finger_transform = np.eye(4)
+        current_right_finger_transform[:3, :3] = current_robot_rot.as_matrix()
+        current_right_finger_transform[:3, 3] = current_robot_pos - current_robot_rot.as_matrix()[:, 0] * 0.04
+        current_right_finger.transform(current_right_finger_transform)
+
         logger.info("\n🎨 Visualization Guide:")
         logger.info("   - WHITE/RGB points: Segmented object")
-        logger.info("   - LARGE RGB axes at origin: Robot base frame")
-        logger.info("   - LARGER RGB axes: Grasp pose coordinate frame")
+        logger.info("   - LARGE RGB axes at origin: Robot BASE frame")
+        logger.info("   - MEDIUM RGB axes (CYAN marker): Current robot EE pose")
+        logger.info("   - LARGER RGB axes (MAGENTA marker): TARGET grasp pose")
+        logger.info("   ")
+        logger.info("   Coordinate frames:")
         logger.info("     - RED axis (X): Gripper finger closing direction")
         logger.info("     - GREEN axis (Y): Gripper width direction")
         logger.info("     - BLUE axis (Z): Gripper approach direction")
-        logger.info("   - RED ARROW: Gripper approach vector (Z-axis)")
-        logger.info("   - BLUE BOXES: Simplified gripper fingers")
-        logger.info("   - MAGENTA sphere: Grasp center point")
+        logger.info("   ")
+        logger.info("   - RED ARROW: Gripper approach vector at target (Z-axis)")
+        logger.info("   - BLUE BOXES: Gripper fingers at TARGET grasp pose")
+        logger.info("   - ORANGE BOXES: Gripper fingers at CURRENT robot pose")
+        logger.info("   - CYAN sphere: Current robot EE position")
+        logger.info("   - MAGENTA sphere: Target grasp center point")
         logger.info("\n⚠️  CHECK: ")
-        logger.info("   1. Is the grasp frame ON the object (not at robot base)?")
-        logger.info("   2. Does the RED ARROW point in a sensible approach direction?")
-        logger.info("   3. Are the BLUE FINGERS aligned to grasp the object?")
+        logger.info("   1. Are the TARGET gripper (blue) and CURRENT gripper (orange) in different positions?")
+        logger.info("   2. Is the target grasp frame ON the object (not at robot base)?")
+        logger.info("   3. Does the RED ARROW point in a sensible approach direction?")
+        logger.info("   4. Are the BLUE FINGERS (target) aligned to grasp the object?")
+        logger.info("   5. Can the robot reach from ORANGE to BLUE position without collision?")
         logger.info("\nClose the window to continue...")
 
-        # Visualize
+        # Visualize - include current robot pose visualization
         o3d.visualization.draw_geometries(
-            [pcd, robot_frame, grasp_frame, grasp_marker, arrow, left_finger, right_finger],
-            window_name=f"GRASP POSE - '{prompt}' at [{grasp_pos[0]:.3f}, {grasp_pos[1]:.3f}, {grasp_pos[2]:.3f}] RPY:[{euler_deg[0]:.0f}, {euler_deg[1]:.0f}, {euler_deg[2]:.0f}]",
+            [pcd, robot_frame, current_robot_frame, current_robot_marker,
+             grasp_frame, grasp_marker, arrow,
+             left_finger, right_finger, current_left_finger, current_right_finger],
+            window_name=f"GRASP COMPARISON - '{prompt}' | Current:[{current_robot_pos[0]:.3f},{current_robot_pos[1]:.3f},{current_robot_pos[2]:.3f}] Target:[{grasp_pos[0]:.3f},{grasp_pos[1]:.3f},{grasp_pos[2]:.3f}]",
             width=1280,
             height=720,
         )
