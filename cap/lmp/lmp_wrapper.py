@@ -93,6 +93,16 @@ class LMPWrapper:
         self.topk_num_grasps = -1
         self.visualize_top_k = 10  # Only visualize top K grasps
 
+        # CRITICAL: Transform between robot TCP frame and GraspGen convention
+        # GraspGen assumes: X = finger closing, Y = width, Z = approach
+        # Real robot has:   Y = finger closing, X = width, Z = approach
+        # Solution: Rotate -90° around Z to go from GraspGen -> Robot TCP
+        # This is applied AFTER grasps are generated to convert them to robot frame
+        self.T_graspgen_to_tcp = tra.rotation_matrix(-np.pi/2, [0, 0, 1])
+        logger.info("Gripper frame correction: GraspGen -> Robot TCP = -90° around Z")
+        logger.info("  GraspGen: fingers along X, approach along Z")
+        logger.info("  Robot:    fingers along Y, approach along Z")
+
     def _setup_lmp_environment(self):
         """Setup LMP-specific environment variables and object tracking."""
         # Mock object tracking (replace with actual computer vision)
@@ -255,6 +265,21 @@ class LMPWrapper:
                     logger.info(f"   FULL POSE: {grasp_pose.tolist()}")
                     logger.info(f"   Format: [x(mm), y(mm), z(mm), roll(deg), pitch(deg), yaw(deg)]")
 
+                    # DEBUG: Print the rotation matrix details
+                    logger.info(f"\n🔍 DEBUG: Grasp rotation matrix analysis:")
+                    logger.info(f"   X-axis (width direction): [{rotation_matrix[0,0]:.3f}, {rotation_matrix[1,0]:.3f}, {rotation_matrix[2,0]:.3f}]")
+                    logger.info(f"   Y-axis (finger direction): [{rotation_matrix[0,1]:.3f}, {rotation_matrix[1,1]:.3f}, {rotation_matrix[2,1]:.3f}]")
+                    logger.info(f"   Z-axis (approach direction): [{rotation_matrix[0,2]:.3f}, {rotation_matrix[1,2]:.3f}, {rotation_matrix[2,2]:.3f}]")
+
+                    # Verify roundtrip
+                    rotation_verify = st.Rotation.from_euler('xyz', orientation_deg, degrees=True)
+                    matrix_verify = rotation_verify.as_matrix()
+                    logger.info(f"\n🔍 DEBUG: Euler angle roundtrip verification:")
+                    logger.info(f"   Original matrix matches roundtrip? {np.allclose(rotation_matrix, matrix_verify)}")
+                    if not np.allclose(rotation_matrix, matrix_verify):
+                        logger.error(f"   ⚠️ WARNING: Euler conversion has issues!")
+                        logger.error(f"   Max difference: {np.abs(rotation_matrix - matrix_verify).max():.6f}")
+
                     return grasp_pose
 
                 else:
@@ -403,9 +428,14 @@ class LMPWrapper:
             # Transform grasps back to original coordinate frame
             # (undo the centering transformation)
             T_add_pc_mean = tra.translation_matrix(points.mean(axis=0))
-            grasps_original = np.array([T_add_pc_mean @ g for g in grasps_inferred])
+            grasps_centered_robot = np.array([T_add_pc_mean @ g for g in grasps_inferred])
 
-            return grasps_original, grasp_conf_inferred
+            # CRITICAL: Apply gripper frame correction
+            # GraspGen outputs grasps in its own convention (fingers along X)
+            # But real robot has fingers along Y, so rotate -90° around Z
+            grasps_robot_frame = np.array([g @ self.T_graspgen_to_tcp for g in grasps_centered_robot])
+
+            return grasps_robot_frame, grasp_conf_inferred
 
         except Exception as e:
             logger.error(f"Error generating grasps: {e}")
@@ -564,38 +594,47 @@ class LMPWrapper:
         grasp_marker.translate(grasp_pos)
 
         # Create gripper fingers visualization at GRASP pose (simplified)
+        # REAL ROBOT: Fingers open/close along Y-axis (not X)
         finger_width = 0.08
         finger_thickness = 0.01
         finger_length = 0.04
 
-        # Left finger
+        # Box is created from [0,0,0] to [width, height, depth], so center is at:
+        box_local_center = np.array([finger_thickness/2, finger_width/2, finger_length/2])
+
+        # Left finger (offset along +Y since real robot fingers are along Y)
         left_finger = o3d.geometry.TriangleMesh.create_box(
             width=finger_thickness, height=finger_width, depth=finger_length
         )
         left_finger.paint_uniform_color([0.3, 0.3, 0.8])  # Blue-ish
         left_finger_transform = np.eye(4)
         left_finger_transform[:3, :3] = grasp_rot
-        left_finger_transform[:3, 3] = grasp_pos + grasp_rot[:, 0] * 0.04  # Offset along X
+        # Position: grasp center + offset along Y - rotated box center offset
+        left_finger_transform[:3, 3] = grasp_pos + grasp_rot[:, 1] * 0.04 - grasp_rot @ box_local_center
         left_finger.transform(left_finger_transform)
 
-        # Right finger
+        # Right finger (offset along -Y since real robot fingers are along Y)
         right_finger = o3d.geometry.TriangleMesh.create_box(
             width=finger_thickness, height=finger_width, depth=finger_length
         )
         right_finger.paint_uniform_color([0.3, 0.3, 0.8])  # Blue-ish
         right_finger_transform = np.eye(4)
         right_finger_transform[:3, :3] = grasp_rot
-        right_finger_transform[:3, 3] = grasp_pos - grasp_rot[:, 0] * 0.04  # Offset along -X
+        # Position: grasp center - offset along Y - rotated box center offset
+        right_finger_transform[:3, 3] = grasp_pos - grasp_rot[:, 1] * 0.04 - grasp_rot @ box_local_center
         right_finger.transform(right_finger_transform)
 
         # Create current gripper fingers visualization at CURRENT robot pose
+        # REAL ROBOT: Fingers open/close along Y-axis (not X)
         current_left_finger = o3d.geometry.TriangleMesh.create_box(
             width=finger_thickness, height=finger_width, depth=finger_length
         )
         current_left_finger.paint_uniform_color([0.8, 0.5, 0.2])  # Orange-ish
         current_left_finger_transform = np.eye(4)
-        current_left_finger_transform[:3, :3] = current_robot_rot.as_matrix()
-        current_left_finger_transform[:3, 3] = current_robot_pos + current_robot_rot.as_matrix()[:, 0] * 0.04
+        current_robot_rot_matrix = current_robot_rot.as_matrix()
+        current_left_finger_transform[:3, :3] = current_robot_rot_matrix
+        # Position: robot center + offset along Y - rotated box center offset
+        current_left_finger_transform[:3, 3] = current_robot_pos + current_robot_rot_matrix[:, 1] * 0.04 - current_robot_rot_matrix @ box_local_center
         current_left_finger.transform(current_left_finger_transform)
 
         # Right finger (current)
@@ -604,8 +643,9 @@ class LMPWrapper:
         )
         current_right_finger.paint_uniform_color([0.8, 0.5, 0.2])  # Orange-ish
         current_right_finger_transform = np.eye(4)
-        current_right_finger_transform[:3, :3] = current_robot_rot.as_matrix()
-        current_right_finger_transform[:3, 3] = current_robot_pos - current_robot_rot.as_matrix()[:, 0] * 0.04
+        current_right_finger_transform[:3, :3] = current_robot_rot_matrix
+        # Position: robot center - offset along Y - rotated box center offset
+        current_right_finger_transform[:3, 3] = current_robot_pos - current_robot_rot_matrix[:, 1] * 0.04 - current_robot_rot_matrix @ box_local_center
         current_right_finger.transform(current_right_finger_transform)
 
         logger.info("\n🎨 Visualization Guide:")
@@ -614,9 +654,9 @@ class LMPWrapper:
         logger.info("   - MEDIUM RGB axes (CYAN marker): Current robot EE pose")
         logger.info("   - LARGER RGB axes (MAGENTA marker): TARGET grasp pose")
         logger.info("   ")
-        logger.info("   Coordinate frames:")
-        logger.info("     - RED axis (X): Gripper finger closing direction")
-        logger.info("     - GREEN axis (Y): Gripper width direction")
+        logger.info("   Coordinate frames (REAL ROBOT):")
+        logger.info("     - RED axis (X): Gripper width direction")
+        logger.info("     - GREEN axis (Y): Gripper finger closing direction")
         logger.info("     - BLUE axis (Z): Gripper approach direction")
         logger.info("   ")
         logger.info("   - RED ARROW: Gripper approach vector at target (Z-axis)")
@@ -823,10 +863,7 @@ class LMPWrapper:
             logger.info(f"  Target pose:  {position_xyz_or_pose}")
             logger.info(f"  Current orientation (deg): [{current_pose[3]:.1f}, {current_pose[4]:.1f}, {current_pose[5]:.1f}]")
             logger.info(f"  Target orientation (deg):  [{target_orientation[0]:.1f}, {target_orientation[1]:.1f}, {target_orientation[2]:.1f}]")
-
-            # TESTING: Ignore target orientation, keep current orientation
-            logger.warning(f"⚠️  TESTING MODE: Ignoring target orientation, keeping current orientation")
-            target_orientation = current_pose[3:].tolist()
+            logger.info(f"  ✅ Will execute rotation to target orientation")
         else:
             # Just position, keep current orientation
             target_position = np.array(position_xyz_or_pose, dtype=np.float32)
@@ -864,14 +901,14 @@ class LMPWrapper:
             duration: Time to complete movement
             stage_val: Stage value for action
         """
-        # TESTING: Ignore target orientation, keep current orientation
-        current_pose = self.get_robot_pose()
-        logger.warning(f"⚠️  TESTING MODE: goto_pose() ignoring target orientation [{orientation_rpy[0]:.1f}, {orientation_rpy[1]:.1f}, {orientation_rpy[2]:.1f}]")
-        logger.warning(f"⚠️  Keeping current orientation: [{current_pose[3]:.1f}, {current_pose[4]:.1f}, {current_pose[5]:.1f}]")
+        logger.info(f"goto_pose() called:")
+        logger.info(f"  Target position: {position_xyz}")
+        logger.info(f"  Target orientation: [{orientation_rpy[0]:.1f}, {orientation_rpy[1]:.1f}, {orientation_rpy[2]:.1f}]")
+        logger.info(f"  ✅ Will execute rotation to target orientation")
 
         return self._move_to_pose(
             target_position=position_xyz,
-            target_orientation=current_pose[3:].tolist(),
+            target_orientation=orientation_rpy,
             duration=duration,
             stage_val=stage_val,
         )
@@ -1102,20 +1139,17 @@ class LMPWrapper:
 
         # Use segmentation to find the object
         if use_segmentation:
-            try:
-                logger.info(f"Using segmentation to locate: {obj_name_clean}")
-                grasp_pose = self.get_object_center(obj_name_clean)
-                if grasp_pose is not None:
-                    return grasp_pose.tolist()
-                else:
-                    logger.warning(f"Segmentation failed for {obj_name_clean}, using default position")
-            except Exception as e:
-                logger.error(f"Error during segmentation for {obj_name_clean}: {e}")
-                logger.error(traceback.format_exc())
+            logger.info(f"Using segmentation to locate: {obj_name_clean}")
+            grasp_pose = self.get_object_center(obj_name_clean)
+            if grasp_pose is not None:
+                return grasp_pose.tolist()
+            else:
+                logger.error(f"❌ Object detection failed for '{obj_name_clean}' - no grasp pose found")
+                raise RuntimeError(f"Object '{obj_name_clean}' could not be detected. Segmentation returned no valid grasp pose.")
 
-        # Fallback to mock position with top-down orientation
-        logger.warning(f"Mock position returned for {obj_name_clean}")
-        return [0.0, -0.5, 0.0, 179.0, 0.0, 0.0]
+        # If segmentation is disabled, raise an error
+        logger.error(f"❌ Cannot locate '{obj_name_clean}' - not a predefined position and segmentation is disabled")
+        raise RuntimeError(f"Object '{obj_name_clean}' not found. It is not a predefined position (corners/sides) and segmentation is disabled.")
 
     def get_bbox(self, obj_name):
         """
@@ -1319,6 +1353,14 @@ class LMPWrapper:
             state = self.env.get_robot_state()
             start_pose = np.array(state["TCPPose"], dtype=np.float32)
 
+            # DEBUG: Print what we're sending
+            logger.info(f"\n🔍 DEBUG: _move_to_pose() execution:")
+            logger.info(f"   Start pose: {start_pose.tolist()}")
+            logger.info(f"   Target pose: {target_pose.tolist()}")
+            logger.info(f"   Start orientation: [{start_pose[3]:.1f}, {start_pose[4]:.1f}, {start_pose[5]:.1f}]")
+            logger.info(f"   Target orientation: [{target_pose[3]:.1f}, {target_pose[4]:.1f}, {target_pose[5]:.1f}]")
+            logger.info(f"   Orientation delta: [{target_pose[3]-start_pose[3]:.1f}, {target_pose[4]-start_pose[4]:.1f}, {target_pose[5]-start_pose[5]:.1f}]")
+
             # Calculate interpolation steps
             interpolation_steps = int(duration * self._frequency)
 
@@ -1336,9 +1378,31 @@ class LMPWrapper:
                 # Pump obs - same as teleop script
                 obs = self.env.get_obs()
 
-                # Linear interpolation between start and target
+                # Interpolation with proper rotation handling
                 t = (iter_idx + 1) / interpolation_steps
-                interpolated_pose = start_pose + t * (target_pose - start_pose)
+
+                # Linear interpolation for position
+                interpolated_position = start_pose[:3] + t * (target_pose[:3] - start_pose[:3])
+
+                # SLERP for orientation to avoid gimbal lock and angle wrapping
+                start_rot = st.Rotation.from_euler('xyz', start_pose[3:], degrees=True)
+                target_rot = st.Rotation.from_euler('xyz', target_pose[3:], degrees=True)
+                interpolated_rot = st.Slerp([0, 1], st.Rotation.concatenate([start_rot, target_rot]))
+                interpolated_orientation = interpolated_rot(t).as_euler('xyz', degrees=True)
+
+                # Combine position and orientation
+                interpolated_pose = np.concatenate([interpolated_position, interpolated_orientation])
+
+                # DEBUG: Print first and last commands
+                if iter_idx == 0:
+                    logger.info(f"\n🔍 DEBUG: First interpolated command (t={t:.3f}):")
+                    logger.info(f"   Pose: {interpolated_pose.tolist()}")
+                    logger.info(f"   Orientation: [{interpolated_pose[3]:.1f}, {interpolated_pose[4]:.1f}, {interpolated_pose[5]:.1f}]")
+                elif iter_idx == interpolation_steps - 1:
+                    logger.info(f"\n🔍 DEBUG: Last interpolated command (t={t:.3f}):")
+                    logger.info(f"   Pose: {interpolated_pose.tolist()}")
+                    logger.info(f"   Orientation: [{interpolated_pose[3]:.1f}, {interpolated_pose[4]:.1f}, {interpolated_pose[5]:.1f}]")
+                    logger.info(f"   Should match target: [{target_pose[3]:.1f}, {target_pose[4]:.1f}, {target_pose[5]:.1f}]")
 
                 # Create action with current grasp state - same format as teleop
                 action = np.concatenate([interpolated_pose, [self._current_grasp]])
