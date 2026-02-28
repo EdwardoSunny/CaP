@@ -28,6 +28,51 @@ def score_to_color(score, min_score, max_score):
     return np.array([1.0 - t, t, 0.0])
 
 
+def make_pose_axes(transform_4x4, axis_length=0.08, cylinder_radius=0.004,
+                   cone_radius=0.008, label_color=None, label_radius=0.012):
+    """
+    Draw 3 colored axis arrows from a 4x4 homogeneous transform.
+
+    Colors match the robot EEF convention:
+      Red   = X axis (gripper width direction)
+      Green = Y axis (finger closing direction)
+      Blue  = Z axis (approach direction)
+
+    Optionally adds a sphere at the origin with label_color.
+
+    Returns a list of TriangleMesh geometries.
+    """
+    axis_colors = [
+        [1.0, 0.0, 0.0],  # X = red
+        [0.0, 1.0, 0.0],  # Y = green
+        [0.0, 0.0, 1.0],  # Z = blue
+    ]
+
+    origin = transform_4x4[:3, 3]
+    rot = transform_4x4[:3, :3]
+    meshes = []
+
+    for i, color in enumerate(axis_colors):
+        direction = rot[:, i]  # i-th column = i-th axis
+        arrow = make_arrow_mesh(
+            origin, direction,
+            length=axis_length,
+            color=color,
+            cylinder_radius=cylinder_radius,
+            cone_radius=cone_radius,
+        )
+        meshes.append(arrow)
+
+    if label_color is not None:
+        sphere = o3d.geometry.TriangleMesh.create_sphere(radius=label_radius)
+        sphere.paint_uniform_color(label_color)
+        sphere.compute_vertex_normals()
+        sphere.translate(origin)
+        meshes.append(sphere)
+
+    return meshes
+
+
 def make_arrow_mesh(origin, direction, length=0.06, color=[1, 0, 0],
                     cylinder_radius=0.003, cone_radius=0.006, cone_frac=0.3):
     """
@@ -75,6 +120,33 @@ def make_arrow_mesh(origin, direction, length=0.06, color=[1, 0, 0],
     arrow.transform(T)
 
     return arrow
+
+
+def make_gripper_buffer(grasp_4x4, color,
+                        size_x=0.05, size_y=0.16, size_z=0.005):
+    """
+    Create a thin slab representing the gripper clearance buffer,
+    centered at the grasp origin, oriented by the grasp rotation.
+
+    The buffer is the cross-section that must not intersect the table:
+      X (red, thickness):    5 cm  (±2.5 cm)
+      Y (green, finger span): 16 cm (±8 cm)
+      Z (blue, approach):    thin slab (just for visibility)
+    """
+    box = o3d.geometry.TriangleMesh.create_box(
+        width=size_x, height=size_y, depth=size_z
+    )
+    # Center the box at origin
+    box.translate([-size_x / 2, -size_y / 2, -size_z / 2])
+    box.paint_uniform_color(color)
+    box.compute_vertex_normals()
+
+    T = np.eye(4)
+    T[:3, :3] = grasp_4x4[:3, :3]
+    T[:3, 3] = grasp_4x4[:3, 3]
+    box.transform(T)
+
+    return box
 
 
 def make_gripper_fingers(grasp_4x4, color, width=0.08, depth=0.05, thickness=0.012):
@@ -166,17 +238,23 @@ def main():
         has_precomputed_colors = "colors" in data
         if has_precomputed_colors:
             colors = data["colors"]   # Nx3
-        # Load EEF position if available
-        has_eef = "eef_position" in data
-        if has_eef:
-            eef_pos = data["eef_position"]
+        # Load EEF pose (full 4x4 transform, or legacy position-only)
+        has_eef = "eef_transform" in data or "eef_position" in data
+        eef_transform = None
+        if "eef_transform" in data:
+            eef_transform = data["eef_transform"]  # 4x4
+        elif "eef_position" in data:
+            # Legacy: position only, no rotation info
+            eef_transform = np.eye(4)
+            eef_transform[:3, 3] = data["eef_position"]
 
         # Determine best grasp: closest to EEF (least effort), or saved best_idx
         has_best_idx = "best_idx" in data
         if has_best_idx:
             best_idx = int(data["best_idx"])
-        elif has_eef:
+        elif has_eef and eef_transform is not None:
             # Recompute: pick grasp closest to EEF
+            eef_pos = eef_transform[:3, 3]
             grasp_positions = grasps[:, :3, 3]
             distances = np.linalg.norm(grasp_positions - eef_pos, axis=1)
             best_idx = int(np.argmin(distances))
@@ -209,9 +287,13 @@ def main():
         print(f"Best grasp ({selection}): #{best_idx}, score={best_score:.3f}")
         print(f"  Position: [{best_pos[0]:.3f}, {best_pos[1]:.3f}, {best_pos[2]:.3f}] m")
         print(f"  Orientation: [{best_euler[0]:.1f}, {best_euler[1]:.1f}, {best_euler[2]:.1f}] deg")
-        if has_eef:
+        if has_eef and eef_transform is not None:
+            eef_pos = eef_transform[:3, 3]
             dist = np.linalg.norm(best_pos - eef_pos)
             print(f"  Distance to EEF: {dist:.3f} m")
+            eef_euler = spt.Rotation.from_matrix(eef_transform[:3, :3]).as_euler("xyz", degrees=True)
+            print(f"  Current EEF position: [{eef_pos[0]:.3f}, {eef_pos[1]:.3f}, {eef_pos[2]:.3f}] m")
+            print(f"  Current EEF orientation: [{eef_euler[0]:.1f}, {eef_euler[1]:.1f}, {eef_euler[2]:.1f}] deg")
 
         # Add solid 3D arrow for each grasp (approach direction = Z-axis)
         purple = [0.6, 0.0, 1.0]  # purple for best grasp (closest to EEF)
@@ -244,35 +326,45 @@ def main():
             sphere.translate(pos)
             geometries.append(sphere)
 
-        # --- Best grasp: extra highlight ---
-        best_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.08)
-        best_frame.transform(best_grasp)
-        geometries.append(best_frame)
+        # --- Best grasp: RGB axis arrows + purple sphere + gripper fingers ---
+        # Axes: Red=X (width), Green=Y (fingers), Blue=Z (approach)
+        grasp_axes = make_pose_axes(
+            best_grasp,
+            axis_length=0.08,
+            cylinder_radius=0.004,
+            cone_radius=0.008,
+            label_color=purple,  # purple sphere at origin
+            label_radius=0.015,
+        )
+        geometries.extend(grasp_axes)
 
-        # Large purple sphere at best grasp
-        best_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.015)
-        best_sphere.paint_uniform_color(purple)
-        best_sphere.compute_vertex_normals()
-        best_sphere.translate(best_pos)
-        geometries.append(best_sphere)
-
-        # Gripper fingers at best grasp (purple-tinted)
+        # Gripper clearance buffer + fingers at best grasp (purple-tinted)
+        grasp_buf = make_gripper_buffer(best_grasp, color=[0.5, 0.2, 0.8])
+        geometries.append(grasp_buf)
         fingers = make_gripper_fingers(best_grasp, color=[0.5, 0.2, 0.8])
         geometries.extend(fingers)
 
-        # --- Robot end effector position ---
-        if has_eef:
+        # --- Current robot EEF: same RGB axes + cyan sphere + gripper box ---
+        # Matching colors let you compare current vs desired orientation directly
+        if has_eef and eef_transform is not None:
+            eef_pos = eef_transform[:3, 3]
             print(f"EEF position: [{eef_pos[0]:.3f}, {eef_pos[1]:.3f}, {eef_pos[2]:.3f}] m")
-            eef_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.02)
-            eef_sphere.paint_uniform_color([0.0, 1.0, 1.0])  # cyan
-            eef_sphere.compute_vertex_normals()
-            eef_sphere.translate(eef_pos)
-            geometries.append(eef_sphere)
 
-            # Small coordinate frame at EEF
-            eef_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.06)
-            eef_frame.translate(eef_pos)
-            geometries.append(eef_frame)
+            eef_axes = make_pose_axes(
+                eef_transform,
+                axis_length=0.08,
+                cylinder_radius=0.004,
+                cone_radius=0.008,
+                label_color=[0.0, 1.0, 1.0],  # cyan sphere at origin
+                label_radius=0.015,
+            )
+            geometries.extend(eef_axes)
+
+            # Gripper clearance buffer + fingers at current EEF for comparison
+            eef_buf = make_gripper_buffer(eef_transform, color=[0.0, 0.8, 0.8])
+            geometries.append(eef_buf)
+            eef_fingers = make_gripper_fingers(eef_transform, color=[0.0, 0.8, 0.8])
+            geometries.extend(eef_fingers)
 
     elif not args.scene_only:
         print("grasps.npz not found, skipping grasp visualization.")
@@ -284,12 +376,16 @@ def main():
 
     print()
     print("Legend:")
-    print("  Coordinate frame at origin = robot base (R=X, G=Y, B=Z)")
+    print("  Coordinate frame at origin = robot base")
     if not args.scene_only and grasps_path.exists():
-        print(f"  Green->Red 3D arrows = grasp approach (green=high score, red=low)")
-        print(f"  Purple arrow + sphere + coord frame + fingers = best grasp (closest to EEF)")
+        print(f"  Green->Red 3D arrows = all grasps (green=high score, red=low)")
+        print(f"  Purple sphere + slab + arrows = best grasp (closest to EEF)")
+        print(f"  Axis colors (same for EEF and best grasp):")
+        print(f"    Red   = X axis (gripper width direction)")
+        print(f"    Green = Y axis (finger closing direction)")
+        print(f"    Blue  = Z axis (approach direction)")
         if has_eef:
-            print(f"  Cyan sphere + small coord frame = robot end effector")
+            print(f"  Cyan sphere + slab = current robot EEF (slab = gripper clearance buffer)")
     print()
     print("Close the window to exit.")
 

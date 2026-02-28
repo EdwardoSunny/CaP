@@ -245,6 +245,8 @@ class LMPWrapper:
                     self._visualize_grasps(merged_points, merged_colors, grasps, combined_scores, prompt, best_idx)
 
                     # Convert 4x4 grasp matrix to [x, y, z, roll, pitch, yaw]
+                    # TCP offset is set in xArm Studio so get_position() / set_servo_cartesian()
+                    # already reference the grasp center (between fingertips), matching GraspGen.
                     # Position from GraspGen is in meters, convert to millimeters for robot
                     position_m = best_grasp[:3, 3]  # meters
                     position_mm = position_m * 1000.0  # Convert to millimeters for robot

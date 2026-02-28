@@ -127,25 +127,43 @@ def generate_grasps(seg_points):
     ])
     print(f"Score range for coloring: {s_min:.3f} - {s_max:.3f}")
 
-    # Filter out grasps below z=0 (below robot base / table level)
-    above_table = grasps_robot[:, 2, 3] >= 0
+    # Filter out grasps where the gripper clearance buffer would go below z=0 (table).
+    # The EEF position is the gripper center. The physical clearance needed is:
+    #   X (red, thickness):    ±2.5 cm
+    #   Y (green, finger span): ±8 cm
+    # Z (approach) is ignored — the EEF position is already at the bottom of the gripper.
+    gripper_half = np.array([0.025, 0.08, 0.0])  # half-extents in local frame (m)
+    # 4 corners (only X and Y matter, Z=0 at grasp center)
+    signs = np.array([[sx, sy, 0.0]
+                      for sx in [-1, 1] for sy in [-1, 1]])
+    local_corners = signs * gripper_half  # (4, 3)
+
+    table_safe = np.ones(len(grasps_robot), dtype=bool)
+    for i, g in enumerate(grasps_robot):
+        pos = g[:3, 3]
+        rot = g[:3, :3]
+        # Transform corners to world frame
+        world_corners = (rot @ local_corners.T).T + pos  # (4, 3)
+        if world_corners[:, 2].min() < 0:
+            table_safe[i] = False
+
     n_before = len(grasps_robot)
-    grasps_robot = grasps_robot[above_table]
-    scores = scores[above_table]
-    grasp_colors = grasp_colors[above_table]
+    grasps_robot = grasps_robot[table_safe]
+    scores = scores[table_safe]
+    grasp_colors = grasp_colors[table_safe]
     n_filtered = n_before - len(grasps_robot)
     if n_filtered > 0:
-        print(f"Filtered out {n_filtered} grasps below z=0 (below table)")
+        print(f"Filtered out {n_filtered} grasps where gripper buffer intersects table (z=0)")
 
-    # Filter out grasps with confidence below 85%
-    high_conf = scores >= 0.85
+    # Filter out grasps with confidence below 80%
+    high_conf = scores >= 0.80
     n_before2 = len(grasps_robot)
     grasps_robot = grasps_robot[high_conf]
     scores = scores[high_conf]
     grasp_colors = grasp_colors[high_conf]
     n_filtered2 = n_before2 - len(grasps_robot)
     if n_filtered2 > 0:
-        print(f"Filtered out {n_filtered2} grasps below 85% confidence")
+        print(f"Filtered out {n_filtered2} grasps below 80% confidence")
 
     if len(grasps_robot) == 0:
         print("No valid grasps remaining after filtering.")
@@ -240,10 +258,12 @@ def main():
         if seg_points is not None:
             grasps, grasp_scores, grasp_colors = generate_grasps(seg_points)
 
-        # --- Query robot end effector position ---
-        print("\n--- Querying robot end effector position ---")
+        # --- Query robot end effector pose (full 4x4 transform) ---
+        # TCP offset is configured in xArm Studio, so get_position() already
+        # returns the grasp center (between fingertips), matching GraspGen poses.
+        print("\n--- Querying robot end effector pose ---")
         robot_ip = "192.168.1.223"
-        eef_pos_m = None
+        eef_transform = None  # 4x4 homogeneous transform in robot base frame (meters)
         try:
             arm = XArmAPI(robot_ip)
             arm.connect()
@@ -251,14 +271,49 @@ def main():
             arm.disconnect()
             if code == 0:
                 # pose is [x, y, z, roll, pitch, yaw] in mm and degrees
-                eef_pos_m = np.array(pose[:3]) / 1000.0  # convert mm -> m
-                eef_euler = pose[3:6]
-                print(f"  EEF position: [{eef_pos_m[0]:.3f}, {eef_pos_m[1]:.3f}, {eef_pos_m[2]:.3f}] m")
-                print(f"  EEF orientation: [{eef_euler[0]:.1f}, {eef_euler[1]:.1f}, {eef_euler[2]:.1f}] deg")
+                eef_pos_m = np.array(pose[:3]) / 1000.0  # mm -> m
+                eef_euler_deg = np.array(pose[3:6])
+                eef_rot = spt.Rotation.from_euler("xyz", eef_euler_deg, degrees=True)
+
+                eef_transform = np.eye(4)
+                eef_transform[:3, :3] = eef_rot.as_matrix()
+                eef_transform[:3, 3] = eef_pos_m
+
+                print(f"  EEF position (grasp center): [{eef_pos_m[0]:.3f}, {eef_pos_m[1]:.3f}, {eef_pos_m[2]:.3f}] m")
+                print(f"  EEF orientation: [{eef_euler_deg[0]:.1f}, {eef_euler_deg[1]:.1f}, {eef_euler_deg[2]:.1f}] deg (xyz euler)")
+                print(f"  Frame convention: X=gripper width, Y=finger close, Z=approach")
             else:
                 print(f"  Failed to get robot position (error code: {code})")
         except Exception as e:
             print(f"  Could not connect to robot at {robot_ip}: {e}")
+
+        # --- Normalize grasp orientations for gripper symmetry ---
+        # The parallel gripper is symmetric under 180-deg rotation around its
+        # approach axis (Z).  GraspGen picks an arbitrary X/Y orientation, which
+        # may require a needless 180-deg spin.  For each grasp, pick whichever
+        # of the two Z-flips (original or +180 around Z) is closer to the
+        # current EEF orientation.
+        if grasps is not None and eef_transform is not None:
+            print("\n--- Normalizing grasp orientations (gripper Z-symmetry) ---")
+            Rz180 = np.eye(4)
+            Rz180[0, 0] = -1
+            Rz180[1, 1] = -1  # 180 deg around Z: flips X and Y, keeps Z
+
+            eef_rot = spt.Rotation.from_matrix(eef_transform[:3, :3])
+            n_flipped = 0
+            for i in range(len(grasps)):
+                rot_orig = spt.Rotation.from_matrix(grasps[i, :3, :3])
+                rot_flip = rot_orig * spt.Rotation.from_matrix(Rz180[:3, :3])
+
+                # Rotation needed to go from EEF to each candidate
+                delta_orig = (rot_orig * eef_rot.inv()).magnitude()
+                delta_flip = (rot_flip * eef_rot.inv()).magnitude()
+
+                if delta_flip < delta_orig:
+                    grasps[i] = grasps[i] @ Rz180
+                    n_flipped += 1
+
+            print(f"  Flipped {n_flipped}/{len(grasps)} grasps to reduce rotation from EEF")
 
         # --- Save point clouds ---
         print("\n--- Saving PLY files ---")
@@ -292,8 +347,9 @@ def main():
             # Select best grasp: closest to EEF (least effort) if EEF available,
             # otherwise highest score
             grasp_positions = grasps[:, :3, 3]
-            if eef_pos_m is not None:
-                distances = np.linalg.norm(grasp_positions - eef_pos_m, axis=1)
+            if eef_transform is not None:
+                eef_pos = eef_transform[:3, 3]
+                distances = np.linalg.norm(grasp_positions - eef_pos, axis=1)
                 best_idx = int(np.argmin(distances))
                 print(f"\n  Best grasp selection: closest to EEF (distance={distances[best_idx]:.3f} m)")
             else:
@@ -314,8 +370,8 @@ def main():
                 "colors": grasp_colors,     # Nx3 pre-computed colors
                 "best_idx": best_idx,       # index of best grasp (closest to EEF)
             }
-            if eef_pos_m is not None:
-                save_dict["eef_position"] = eef_pos_m  # [x, y, z] in meters
+            if eef_transform is not None:
+                save_dict["eef_transform"] = eef_transform  # 4x4 in robot frame (meters)
             np.savez("grasps.npz", **save_dict)
             print(f"  grasps.npz (full 4x4 poses + scores + colors + best_idx + eef)")
 
@@ -383,8 +439,9 @@ def main():
             print(f"  - Green->Red arrows: {len(grasps)} grasps (green=high confidence, red=low)")
             print(f"  - Purple arrow = best grasp (closest to EEF / least effort)")
             print(f"  - Arrows point along approach direction (gripper Z-axis)")
-        if eef_pos_m is not None:
-            print(f"  - Cyan sphere: robot end effector position")
+        if eef_transform is not None:
+            print(f"  - Current EEF: colored axes (R=X width, G=Y fingers, B=Z approach)")
+            print(f"  - Best grasp: matching colored axes to compare orientation")
         print("  - Coordinate frame at origin: robot base (R=X, G=Y, B=Z)")
 
     except Exception as e:
