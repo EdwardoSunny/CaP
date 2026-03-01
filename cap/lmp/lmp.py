@@ -11,11 +11,40 @@ import astunparse
 from time import sleep
 from shapely.geometry import *
 from shapely.affinity import *
-from openai import RateLimitError, APIConnectionError
+from openai import RateLimitError, APIConnectionError, APIError
 from pygments import highlight
 from pygments.lexers import PythonLexer
 from pygments.formatters import TerminalFormatter
 from cap.lmp.utils import load_prompt
+
+
+def _strip_echoed_query(text, use_query):
+    """Strip the echoed query line from the start of model output.
+    
+    The Responses API models often echo back the query/prompt prefix.
+    The old Chat Completions API didn't do this because the prompt was
+    a separate message. Remove it so stop-token trimming works correctly.
+    """
+    stripped = text.strip()
+    if use_query and stripped.startswith(use_query.strip()):
+        stripped = stripped[len(use_query.strip()):].strip()
+    return stripped
+
+
+def _trim_at_stop_tokens(text, stop_tokens):
+    """Trim text at the first occurrence of any stop token.
+    
+    The Responses API does not support stop tokens natively,
+    so we handle them in post-processing.
+    """
+    if not stop_tokens:
+        return text
+    earliest = len(text)
+    for token in stop_tokens:
+        idx = text.find(token)
+        if idx != -1 and idx < earliest:
+            earliest = idx
+    return text[:earliest]
 
 
 class LMP:
@@ -63,28 +92,37 @@ class LMP:
 
     def __call__(self, query, context="", **kwargs):
         prompt, use_query = self.build_prompt(query, context=context)
+        print(f"[DEBUG LMP {self._name}] prompt length: {len(prompt)} chars, use_query: {use_query!r}")
         while True:
             try:
-                # Updated to use chat completions with system/user messages
-                response = self._client.chat.completions.create(
-                    model=self._cfg.get(
-                        "model", "gpt-4o"
-                    ),  # Use model instead of engine
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a helpful assistant that pays attention to the user's instructions and writes good python code for operating a robot arm in a tabletop environment. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran. Do not repeat my code, just complete/continue from my code. Do not import any packages that aren't already there, you should never use the import keyword since all packages you need are already imported in the examples.",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    stop=self._stop_tokens,
-                    temperature=self._cfg["temperature"],
-                    max_tokens=self._cfg["max_tokens"],
+                response = self._client.responses.create(
+                    model=self._cfg.get("model", "gpt-5-nano"),
+                    instructions="You are a helpful assistant that pays attention to the user's instructions and writes good python code for operating a robot arm in a tabletop environment. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran. Do not repeat my code, just complete/continue from my code. Do not import any packages that aren't already there, you should never use the import keyword since all packages you need are already imported in the examples.",
+                    input=prompt,
+                    reasoning={"effort": "low"},
+                    max_output_tokens=self._cfg["max_tokens"],
                 )
 
-                code_str = response.choices[0].message.content.strip()
+                raw_text = response.output_text or ""
+                print(f"[DEBUG LMP {self._name}] status={response.status}, output_text length={len(raw_text)}")
+                print(f"[DEBUG LMP {self._name}] raw response:\n---\n{raw_text}\n---")
+
+                # Strip markdown code fences if model wraps output
+                stripped = raw_text.strip()
+                if stripped.startswith("```python"):
+                    stripped = stripped[len("```python"):].strip()
+                if stripped.startswith("```"):
+                    stripped = stripped[len("```"):].strip()
+                if stripped.endswith("```"):
+                    stripped = stripped[:-3].strip()
+
+                # Strip echoed query prefix (Responses API models echo it back)
+                stripped = _strip_echoed_query(stripped, use_query)
+
+                code_str = _trim_at_stop_tokens(stripped, self._stop_tokens)
+                print(f"[DEBUG LMP {self._name}] after trim:\n---\n{code_str}\n---")
                 break
-            except (RateLimitError, APIConnectionError) as e:
+            except (RateLimitError, APIConnectionError, APIError) as e:
                 print(f"OpenAI API got err {e}")
                 print("Retrying after 10s.")
                 sleep(10)
@@ -139,43 +177,43 @@ class LMPFGen:
 
         while True:
             try:
-                # Updated to use chat completions
-                response = self._client.chat.completions.create(
-                    model=self._cfg.get("model", "gpt-4o"),
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a helpful coding assistant. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran.",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    stop=self._stop_tokens,
-                    temperature=self._cfg["temperature"],
-                    max_tokens=self._cfg["max_tokens"],
+                response = self._client.responses.create(
+                    model=self._cfg.get("model", "gpt-5-nano"),
+                    instructions="You are a helpful coding assistant. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran.",
+                    input=prompt,
+                    reasoning={"effort": "low"},
+                    max_output_tokens=self._cfg["max_tokens"],
                 )
-                f_src = response.choices[0].message.content.strip()
+                raw_text = response.output_text or ""
+                print(f"[DEBUG LMPFGen] raw response:\n---\n{raw_text}\n---")
+
+                stripped = raw_text.strip()
+                if stripped.startswith("```python"):
+                    stripped = stripped[len("```python"):].strip()
+                if stripped.startswith("```"):
+                    stripped = stripped[len("```"):].strip()
+                if stripped.endswith("```"):
+                    stripped = stripped[:-3].strip()
+
+                stripped = _strip_echoed_query(stripped, use_query)
+
+                f_src = _trim_at_stop_tokens(stripped, self._stop_tokens)
                 break
-            except (RateLimitError, APIConnectionError) as e:
+            except (RateLimitError, APIConnectionError, APIError) as e:
                 print(f"OpenAI API got err {e}")
                 print("Retrying after 10s.")
                 sleep(10)
 
         if fix_bugs:
-            # Note: The Edit API has been deprecated. You might want to use chat completions for bug fixing instead
             try:
-                edit_response = self._client.chat.completions.create(
-                    model=self._cfg.get("model", "gpt-4o"),
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "Fix any bugs in the following code. Improve readability. Keep same inputs and outputs. Only make small changes. No comments. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran.",
-                        },
-                        {"role": "user", "content": f_src},
-                    ],
-                    temperature=0,
-                    max_tokens=self._cfg["max_tokens"],
+                edit_response = self._client.responses.create(
+                    model=self._cfg.get("model", "gpt-5-nano"),
+                    instructions="Fix any bugs in the following code. Improve readability. Keep same inputs and outputs. Only make small changes. No comments. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran.",
+                    input=f_src,
+                    reasoning={"effort": "low"},
+                    max_output_tokens=self._cfg["max_tokens"],
                 )
-                f_src = edit_response.choices[0].message.content.strip()
+                f_src = edit_response.output_text.strip()
             except Exception as e:
                 print(f"Bug fixing failed: {e}. Using original code.")
 

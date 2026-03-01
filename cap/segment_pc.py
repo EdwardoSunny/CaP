@@ -134,6 +134,12 @@ class RobotFrameMerger:
         # Configure camera with auto defaults
         self._configure_camera(pipeline)
 
+        # Align depth to color frame — MUST match calibration which uses
+        # rs.align(rs.stream.color) before deprojecting. Without this, point
+        # clouds are in the depth/IR sensor frame instead of the color frame,
+        # causing ~50mm offset (the color-to-IR baseline).
+        align = rs.align(rs.stream.color)
+
         # Create post-processing filters (simplified approach like robot_calib)
         filters = [
             rs.spatial_filter(),
@@ -141,7 +147,7 @@ class RobotFrameMerger:
             rs.hole_filling_filter(),
         ]
 
-        self.cameras[serial_number] = {"pipeline": pipeline, "filters": filters}
+        self.cameras[serial_number] = {"pipeline": pipeline, "filters": filters, "align": align}
 
         print(f"Camera {serial_number} initialized")
 
@@ -190,9 +196,11 @@ class RobotFrameMerger:
         camera_data = self.cameras[serial]
         pipeline = camera_data["pipeline"]
         filters = camera_data["filters"]
+        align = camera_data["align"]
 
-        # Capture frame
+        # Capture frame and align depth to color (matches calibration)
         frames = pipeline.wait_for_frames()
+        frames = align.process(frames)
         depth_frame = frames.get_depth_frame()
         color_frame = frames.get_color_frame()
 
@@ -243,9 +251,11 @@ class RobotFrameMerger:
             print(f"  Running SAM on image from camera {serial}...")
             masks_data = self.sam_generator.generate(color_image_rgb)
 
+            masks = None
+            best_mask_idx = None
+
             if not masks_data:
                 print(f"  Warning: SAM found no masks for camera {serial}")
-                segmentation_mask = valid_mask  # Fall back to just valid points
             else:
                 masks = np.array([m["segmentation"] for m in masks_data])
                 print(f"  Found {len(masks)} masks")
@@ -261,15 +271,74 @@ class RobotFrameMerger:
                     self.device,
                 )
 
-                if best_mask_idx is None:
-                    print(f"  Warning: Could not find matching mask")
-                    segmentation_mask = valid_mask
+            # --- Always visualize: original image, SAM masks, CLIP selection ---
+            try:
+                import cv2 as _cv2
+
+                n_masks = len(masks) if masks is not None else 0
+
+                # Build the three panels
+                img_h, img_w = color_image_rgb.shape[:2]
+
+                # 1) Original image (RGB -> BGR for cv2)
+                panel_orig = np.ascontiguousarray(color_image_rgb[:, :, ::-1])
+                _cv2.putText(panel_orig, f"Camera {serial}", (10, 30),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                _cv2.putText(panel_orig, "Original", (10, 60),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+                # 2) All SAM masks overlay
+                if masks is not None and n_masks > 0:
+                    overlay = color_image_rgb.copy()
+                    np.random.seed(42)
+                    for mi in range(n_masks):
+                        color_rand = np.random.randint(60, 255, 3).tolist()
+                        overlay[masks[mi]] = (overlay[masks[mi]] * 0.4 + np.array(color_rand) * 0.6).astype(np.uint8)
+                    panel_masks = np.ascontiguousarray(overlay[:, :, ::-1])  # RGB -> BGR
                 else:
-                    # Apply the selected mask
-                    target_mask = masks[best_mask_idx]
-                    point_in_segment_mask = target_mask[v, u]
-                    segmentation_mask = valid_mask & point_in_segment_mask
-                    print(f"  Segmentation mask applied")
+                    panel_masks = np.ascontiguousarray(color_image_rgb[:, :, ::-1])
+                _cv2.putText(panel_masks, f"SAM: {n_masks} masks", (10, 30),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+                # 3) CLIP-selected mask
+                if best_mask_idx is not None and masks is not None:
+                    selected = color_image_rgb.copy()
+                    green = np.array([0, 255, 0], dtype=np.uint8)
+                    selected[masks[best_mask_idx]] = (selected[masks[best_mask_idx]] * 0.4 + green * 0.6).astype(np.uint8)
+                    # Red contour
+                    from scipy import ndimage
+                    contour = ndimage.binary_dilation(masks[best_mask_idx]) ^ masks[best_mask_idx]
+                    selected[contour] = [255, 0, 0]
+                    panel_clip = np.ascontiguousarray(selected[:, :, ::-1])  # RGB -> BGR
+                    clip_label = f"CLIP: #{best_mask_idx} '{text_prompt}'"
+                else:
+                    panel_clip = np.ascontiguousarray(color_image_rgb[:, :, ::-1])
+                    clip_label = f"CLIP: NO MATCH for '{text_prompt}'"
+                _cv2.putText(panel_clip, clip_label, (10, 30),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+
+                # Concatenate horizontally
+                combined = np.hstack([panel_orig, panel_masks, panel_clip])
+                window_name = f"Segmentation Debug - Camera {serial} - Close to continue"
+                _cv2.imshow(window_name, combined)
+                print(f"  Showing segmentation debug window. Press any key to continue...")
+                _cv2.waitKey(0)
+                _cv2.destroyWindow(window_name)
+            except Exception as viz_e:
+                print(f"  Warning: Could not show segmentation visualization: {viz_e}")
+                import traceback
+                traceback.print_exc()
+
+            # Apply mask result
+            if best_mask_idx is not None and masks is not None:
+                target_mask = masks[best_mask_idx]
+                point_in_segment_mask = target_mask[v, u]
+                segmentation_mask = valid_mask & point_in_segment_mask
+                n_seg_pts = segmentation_mask.sum()
+                print(f"  Segmentation mask applied ({n_seg_pts} points in segment)")
+            else:
+                print(f"  Warning: No valid mask selected, using all valid points")
+                segmentation_mask = valid_mask
         else:
             segmentation_mask = valid_mask
 
@@ -320,8 +389,10 @@ class RobotFrameMerger:
                 camera_data = self.cameras[serial]
                 pipeline = camera_data["pipeline"]
                 filters = camera_data["filters"]
+                align = camera_data["align"]
 
                 frames = pipeline.wait_for_frames()
+                frames = align.process(frames)
                 depth_frame = frames.get_depth_frame()
                 if depth_frame:
                     for filter in filters:

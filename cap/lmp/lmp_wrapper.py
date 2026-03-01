@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 
 class LMPWrapper:
-    def __init__(self, env, xarm_config, frequency=30, command_latency=0.01, camera_serials=["327122079374", "317422074281"]):
+
+    def __init__(self, env, xarm_config, frequency=30, command_latency=0.01, camera_serials=["327122079374", "317222072157"]):
         """
         Initialize robot primitives using teleop script's exact components.
 
@@ -43,7 +44,6 @@ class LMPWrapper:
 
         # Get initial robot state - same as teleop script
         state = self.env.get_robot_state()
-
         self._current_pose = np.array(state["TCPPose"], dtype=np.float32)
 
         # LMP-specific additions
@@ -93,6 +93,13 @@ class LMPWrapper:
         self.topk_num_grasps = -1
         self.visualize_top_k = 10  # Only visualize top K grasps
 
+        # Gripper depth offset: GraspGen was trained on a Robotiq 2F-140 which has
+        # longer fingers than the actual xArm gripper. The grasp center (midpoint
+        # between fingertips) sits ~160mm higher on the Robotiq. We compensate by
+        # shifting each grasp pose forward along its approach axis (Z) by this amount,
+        # moving the grasp center down to where our shorter gripper's fingertips are.
+        self.grasp_z_offset_m = 0.160  # meters, positive = closer to object (opposite to approach dir)
+
         # CRITICAL: Transform between robot TCP frame and GraspGen convention
         # GraspGen assumes: X = finger closing, Y = width, Z = approach
         # Real robot has:   Y = finger closing, X = width, Z = approach
@@ -106,7 +113,9 @@ class LMPWrapper:
     def _setup_lmp_environment(self):
         """Setup LMP-specific environment variables and object tracking."""
         # Mock object tracking (replace with actual computer vision)
-        self.known_objects = []
+        self.known_objects = ["bread", "red ball", "white bottle", "red cup", "blue hot glue gun"]
+        # Stored visualization data for before/after comparison
+        self._last_viz_data = None
 
         # Workspace bounds for your robot (adjust these to match your setup)
         self.workspace_bounds = {
@@ -183,7 +192,12 @@ class LMPWrapper:
         )
 
         try:
-            # Use EXACT same method as segment_pc.py - capture with segmentation
+            # Capture full scene first (no segmentation) for visualization context
+            logger.info("Capturing full scene point cloud...")
+            full_points, full_colors = merger.capture_merged_pointcloud(text_prompt=None)
+
+            # Capture segmented object
+            logger.info(f"Segmenting '{prompt}'...")
             merged_points, merged_colors = merger.capture_merged_pointcloud(
                 text_prompt=prompt
             )
@@ -194,93 +208,56 @@ class LMPWrapper:
                 logger.warning(f"No points found for object: {prompt}")
                 return None
 
-            # # Calculate top surface center (same as get_object_center)
-            # z_threshold = np.percentile(merged_points[:, 2], 100 - 10)  # top 10%
-            # top_points = merged_points[merged_points[:, 2] >= z_threshold]
-            #
-            # if len(top_points) == 0:
-            #     center = np.mean(merged_points, axis=0)
-            # else:
-            #     center_xy = np.mean(top_points[:, :2], axis=0)
-            #     center_z = np.max(merged_points[:, 2])
-            #     center = np.array([center_xy[0], center_xy[1], center_z])
-            #
-            # logger.info(f"Object '{prompt}' top surface center at: {center} (meters)")
-            #
-            # # STEP 1: Visualize point cloud + center with Open3D (waits for user)
-            # logger.info("\n👁️  Opening Open3D visualization of point cloud + center...")
-            # self._visualize_detection(merged_points, merged_colors, center, prompt)
-
             # Generate grasps if GraspGen is available
             if self.grasp_sampler is not None:
-                logger.info("\n🎯 Generating grasps on segmented point cloud...")
+                logger.info("Generating grasps on segmented point cloud...")
                 grasps, grasp_scores = self._generate_grasps_on_pointcloud(merged_points)
 
                 if grasps is not None and len(grasps) > 0:
-                    logger.info(f"Generated {len(grasps)} grasps with scores {grasp_scores.min():.3f} - {grasp_scores.max():.3f}")
+                    # Filter grasps and select best (closest to EEF)
+                    logger.info(f"Filtering and selecting best grasp...")
+                    result = self._filter_and_select_best_grasp(grasps, grasp_scores)
+                    best_idx, best_grasp, best_score, grasps_filtered, scores_filtered = result
 
-                    # Select best grasp using combined score:
-                    # - GraspGen confidence (quality)
-                    # - Height preference (higher Z is better for top-down grasps)
-                    # - Distance to robot base (closer is better to avoid reaching too far)
-                    best_idx, best_grasp, best_score, combined_scores = self._select_best_grasp(
-                        grasps, grasp_scores, merged_points
-                    )
-
-                    # CRITICAL DEBUG: Visualize the best grasp in robot frame with Open3D
-                    logger.info("\n🔍 DEBUGGING: Visualizing best grasp pose in robot frame...")
-                    logger.info(f"   Object point cloud bounds:")
-                    logger.info(f"     X: {merged_points[:,0].min():.3f} to {merged_points[:,0].max():.3f}")
-                    logger.info(f"     Y: {merged_points[:,1].min():.3f} to {merged_points[:,1].max():.3f}")
-                    logger.info(f"     Z: {merged_points[:,2].min():.3f} to {merged_points[:,2].max():.3f}")
-                    logger.info(f"   Best grasp 4x4 matrix:")
-                    logger.info(f"{best_grasp}")
-
-                    # Visualize best grasp in robot frame with Open3D
-                    self._visualize_grasp_in_robot_frame(merged_points, merged_colors, best_grasp, prompt)
-
-                    # Visualize top K grasps with meshcat (waits for user)
-                    # Use combined scores so visualization matches selection
-                    logger.info("\n🎨 Opening meshcat visualization of grasps...")
-                    self._visualize_grasps(merged_points, merged_colors, grasps, combined_scores, prompt, best_idx)
+                    if best_grasp is None:
+                        logger.warning("No grasps survived filtering")
+                        return None
 
                     # Convert 4x4 grasp matrix to [x, y, z, roll, pitch, yaw]
-                    # TCP offset is set in xArm Studio so get_position() / set_servo_cartesian()
-                    # already reference the grasp center (between fingertips), matching GraspGen.
-                    # Position from GraspGen is in meters, convert to millimeters for robot
-                    position_m = best_grasp[:3, 3]  # meters
-                    position_mm = position_m * 1000.0  # Convert to millimeters for robot
-
-                    # Extract rotation and convert to euler angles (roll, pitch, yaw) in degrees
                     import scipy.spatial.transform as st
+                    position_m = best_grasp[:3, 3]
+                    position_mm = position_m * 1000.0
                     rotation_matrix = best_grasp[:3, :3]
                     rotation = st.Rotation.from_matrix(rotation_matrix)
-                    orientation_deg = rotation.as_euler('xyz', degrees=True)  # roll, pitch, yaw in degrees
+                    orientation_deg = rotation.as_euler('xyz', degrees=True)
 
-                    # Combine into robot pose format [x, y, z, roll, pitch, yaw]
                     grasp_pose = np.concatenate([position_mm, orientation_deg])
 
-                    logger.info(f"\n✅ Best grasp selected (score: {best_score:.3f})")
-                    logger.info(f"   Position (m): [{position_m[0]:.3f}, {position_m[1]:.3f}, {position_m[2]:.3f}]")
-                    logger.info(f"   Position (mm): [{position_mm[0]:.1f}, {position_mm[1]:.1f}, {position_mm[2]:.1f}]")
-                    logger.info(f"   Orientation (deg): [{orientation_deg[0]:.1f}, {orientation_deg[1]:.1f}, {orientation_deg[2]:.1f}]")
-                    logger.info(f"   FULL POSE: {grasp_pose.tolist()}")
-                    logger.info(f"   Format: [x(mm), y(mm), z(mm), roll(deg), pitch(deg), yaw(deg)]")
+                    logger.info(f"\nBest grasp pose for robot:")
+                    logger.info(f"  Position (mm): [{position_mm[0]:.1f}, {position_mm[1]:.1f}, {position_mm[2]:.1f}]")
+                    logger.info(f"  Orientation (deg): [{orientation_deg[0]:.1f}, {orientation_deg[1]:.1f}, {orientation_deg[2]:.1f}]")
+                    logger.info(f"  Score: {best_score:.3f}")
 
-                    # DEBUG: Print the rotation matrix details
-                    logger.info(f"\n🔍 DEBUG: Grasp rotation matrix analysis:")
-                    logger.info(f"   X-axis (width direction): [{rotation_matrix[0,0]:.3f}, {rotation_matrix[1,0]:.3f}, {rotation_matrix[2,0]:.3f}]")
-                    logger.info(f"   Y-axis (finger direction): [{rotation_matrix[0,1]:.3f}, {rotation_matrix[1,1]:.3f}, {rotation_matrix[2,1]:.3f}]")
-                    logger.info(f"   Z-axis (approach direction): [{rotation_matrix[0,2]:.3f}, {rotation_matrix[1,2]:.3f}, {rotation_matrix[2,2]:.3f}]")
+                    # --- Interactive visualization before execution ---
+                    self._visualize_before_execution(
+                        full_points, full_colors,
+                        merged_points, merged_colors,
+                        grasps_filtered, scores_filtered,
+                        best_idx, best_grasp, prompt,
+                    )
 
-                    # Verify roundtrip
-                    rotation_verify = st.Rotation.from_euler('xyz', orientation_deg, degrees=True)
-                    matrix_verify = rotation_verify.as_matrix()
-                    logger.info(f"\n🔍 DEBUG: Euler angle roundtrip verification:")
-                    logger.info(f"   Original matrix matches roundtrip? {np.allclose(rotation_matrix, matrix_verify)}")
-                    if not np.allclose(rotation_matrix, matrix_verify):
-                        logger.error(f"   ⚠️ WARNING: Euler conversion has issues!")
-                        logger.error(f"   Max difference: {np.abs(rotation_matrix - matrix_verify).max():.6f}")
+                    # Store data for "after" visualization
+                    self._last_viz_data = {
+                        "full_points": full_points,
+                        "full_colors": full_colors,
+                        "seg_points": merged_points,
+                        "seg_colors": merged_colors,
+                        "grasps": grasps_filtered,
+                        "scores": scores_filtered,
+                        "best_idx": best_idx,
+                        "best_grasp": best_grasp,
+                        "prompt": prompt,
+                    }
 
                     return grasp_pose
 
@@ -295,101 +272,468 @@ class LMPWrapper:
             # Always cleanup cameras
             merger.cleanup()
 
-    def _select_best_grasp(self, grasps, grasp_scores, object_points):
+    def _visualize_before_execution(
+        self, full_points, full_colors,
+        seg_points, seg_colors,
+        grasps, scores, best_idx, best_grasp, prompt,
+    ):
         """
-        Select the best grasp considering:
-        1. GraspGen confidence score (quality)
-        2. Height preference (higher Z is better for top-down grasping)
-        3. Proximity to robot base (closer is safer, avoids over-reaching)
+        Show an interactive Open3D visualization of the full pipeline output.
+        Blocks until the user closes the window, then execution continues.
+
+        Shows:
+        - Full scene point cloud (original colors)
+        - Segmented object (red-tinted)
+        - All grasp arrows (green=high score, red=low)
+        - Best grasp in purple with RGB axes + gripper fingers
+        - Current EEF in cyan with RGB axes + gripper fingers
+        - Robot base coordinate frame
+        """
+        import open3d as o3d
+        import scipy.spatial.transform as spt
+
+        logger.info("Opening visualization (close window to continue with execution)...")
+
+        geometries = []
+
+        # --- Full scene ---
+        if full_points is not None and len(full_points) > 0:
+            scene_pcd = o3d.geometry.PointCloud()
+            scene_pcd.points = o3d.utility.Vector3dVector(full_points)
+            scene_pcd.colors = o3d.utility.Vector3dVector(full_colors)
+            geometries.append(scene_pcd)
+
+        # --- Segmented object (red-tinted) ---
+        if seg_points is not None and len(seg_points) > 0:
+            seg_pcd = o3d.geometry.PointCloud()
+            seg_pcd.points = o3d.utility.Vector3dVector(seg_points)
+            red = np.array([1.0, 0.0, 0.0])
+            tinted = seg_colors * 0.6 + red * 0.4
+            seg_pcd.colors = o3d.utility.Vector3dVector(np.clip(tinted, 0, 1))
+            geometries.append(seg_pcd)
+
+        # --- Robot base coordinate frame ---
+        robot_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15)
+        geometries.append(robot_frame)
+
+        # --- Helper: make arrow mesh ---
+        def make_arrow(origin, direction, length=0.06, color=[1, 0, 0],
+                       cyl_r=0.003, cone_r=0.006, cone_frac=0.3):
+            cyl_h = length * (1 - cone_frac)
+            cone_h = length * cone_frac
+            arrow = o3d.geometry.TriangleMesh.create_arrow(
+                cylinder_radius=cyl_r, cone_radius=cone_r,
+                cylinder_height=cyl_h, cone_height=cone_h,
+                resolution=8, cylinder_split=1, cone_split=1,
+            )
+            arrow.paint_uniform_color(color)
+            arrow.compute_vertex_normals()
+
+            direction = direction / np.linalg.norm(direction)
+            z = np.array([0.0, 0.0, 1.0])
+            v = np.cross(z, direction)
+            s = np.linalg.norm(v)
+            c = np.dot(z, direction)
+            if s < 1e-8:
+                R = np.eye(3) if c > 0 else np.diag([-1.0, -1.0, 1.0])
+            else:
+                vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+                R = np.eye(3) + vx + vx @ vx * (1 - c) / (s * s)
+            T = np.eye(4)
+            T[:3, :3] = R
+            T[:3, 3] = origin
+            arrow.transform(T)
+            return arrow
+
+        # --- Helper: make RGB pose axes ---
+        def make_pose_axes(transform_4x4, axis_len=0.08, cyl_r=0.004,
+                          cone_r=0.008, label_color=None, label_r=0.012):
+            axis_colors = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+            origin = transform_4x4[:3, 3]
+            rot = transform_4x4[:3, :3]
+            meshes = []
+            for i, col in enumerate(axis_colors):
+                meshes.append(make_arrow(origin, rot[:, i], length=axis_len,
+                                         color=col, cyl_r=cyl_r, cone_r=cone_r))
+            if label_color is not None:
+                sp = o3d.geometry.TriangleMesh.create_sphere(radius=label_r)
+                sp.paint_uniform_color(label_color)
+                sp.compute_vertex_normals()
+                sp.translate(origin)
+                meshes.append(sp)
+            return meshes
+
+        # --- Helper: gripper fingers ---
+        def make_fingers(grasp_4x4, color, width=0.08, depth=0.05, thick=0.012):
+            pos = grasp_4x4[:3, 3]
+            rot = grasp_4x4[:3, :3]
+            meshes = []
+            for sign in [1, -1]:
+                box = o3d.geometry.TriangleMesh.create_box(width=thick, height=thick, depth=depth)
+                box.paint_uniform_color(color)
+                box.compute_vertex_normals()
+                box_center = np.array([thick / 2, thick / 2, depth / 2])
+                T = np.eye(4)
+                T[:3, :3] = rot
+                T[:3, 3] = pos + rot[:, 1] * sign * (width / 2) - rot @ box_center
+                box.transform(T)
+                meshes.append(box)
+            palm = o3d.geometry.TriangleMesh.create_box(width=thick, height=width, depth=thick)
+            palm.paint_uniform_color(color)
+            palm.compute_vertex_normals()
+            palm_center = np.array([thick / 2, width / 2, thick / 2])
+            T_palm = np.eye(4)
+            T_palm[:3, :3] = rot
+            T_palm[:3, 3] = pos - rot @ palm_center
+            palm.transform(T_palm)
+            meshes.append(palm)
+            return meshes
+
+        # --- Score-to-color ---
+        def score_to_color(score, s_min, s_max):
+            if s_max == s_min:
+                return np.array([0.0, 1.0, 0.0])
+            t = (score - s_min) / (s_max - s_min)
+            return np.array([1.0 - t, t, 0.0])
+
+        # --- All grasp arrows ---
+        purple = [0.6, 0.0, 1.0]
+        if grasps is not None and len(grasps) > 0:
+            s_min, s_max = scores.min(), scores.max()
+            for i, g in enumerate(grasps):
+                pos = g[:3, 3]
+                z_axis = g[:3, :3][:, 2]
+                is_best = (i == best_idx)
+                color = purple if is_best else score_to_color(scores[i], s_min, s_max).tolist()
+
+                arrow = make_arrow(
+                    pos, z_axis,
+                    length=0.08 if is_best else 0.05,
+                    color=color,
+                    cyl_r=0.004 if is_best else 0.002,
+                    cone_r=0.008 if is_best else 0.005,
+                )
+                geometries.append(arrow)
+
+                sp = o3d.geometry.TriangleMesh.create_sphere(
+                    radius=0.01 if is_best else 0.005)
+                sp.paint_uniform_color(color)
+                sp.compute_vertex_normals()
+                sp.translate(pos)
+                geometries.append(sp)
+
+        # --- Best grasp: RGB axes + purple sphere + fingers ---
+        if best_grasp is not None:
+            geometries.extend(make_pose_axes(
+                best_grasp, axis_len=0.08, cyl_r=0.004, cone_r=0.008,
+                label_color=purple, label_r=0.015,
+            ))
+            geometries.extend(make_fingers(best_grasp, color=[0.5, 0.2, 0.8]))
+
+        # --- Current EEF: cyan sphere + RGB axes + fingers ---
+        try:
+            state = self.env.get_robot_state()
+            eef_pose = np.array(state["TCPPose"])
+            eef_pos_m = eef_pose[:3] / 1000.0
+            eef_rot = spt.Rotation.from_euler("xyz", eef_pose[3:], degrees=True)
+            eef_transform = np.eye(4)
+            eef_transform[:3, :3] = eef_rot.as_matrix()
+            eef_transform[:3, 3] = eef_pos_m
+
+            geometries.extend(make_pose_axes(
+                eef_transform, axis_len=0.08, cyl_r=0.004, cone_r=0.008,
+                label_color=[0.0, 1.0, 1.0], label_r=0.015,
+            ))
+            geometries.extend(make_fingers(eef_transform, color=[0.0, 0.8, 0.8]))
+        except Exception as e:
+            logger.warning(f"Could not get EEF pose for visualization: {e}")
+
+        # --- Show (blocks until window closed) ---
+        logger.info("Close the visualization window to proceed with robot execution.")
+        logger.info("Legend: Purple=best grasp, Cyan=current EEF, "
+                     "Green->Red=all grasps, Red-tinted=segmented object")
+        o3d.visualization.draw_geometries(
+            geometries,
+            window_name=f"Grasp Preview: '{prompt}' — Close to execute",
+            width=1280, height=720,
+        )
+        logger.info("Visualization closed, continuing with execution...")
+
+    def _visualize_after_execution(
+        self, full_points, full_colors,
+        seg_points, seg_colors,
+        grasps, scores, best_idx, best_grasp, prompt,
+    ):
+        """
+        Show an "after" visualization using the same scene data from before,
+        but with the CURRENT EEF position (after the robot moved).
+
+        This lets you see whether the robot actually reached the target grasp.
+        Shows the target grasp (purple) and the actual EEF (cyan) side by side.
+        """
+        import open3d as o3d
+        import scipy.spatial.transform as spt
+
+        logger.info("Opening AFTER visualization (close window to continue)...")
+
+        geometries = []
+
+        # --- Full scene (same as before) ---
+        if full_points is not None and len(full_points) > 0:
+            scene_pcd = o3d.geometry.PointCloud()
+            scene_pcd.points = o3d.utility.Vector3dVector(full_points)
+            scene_pcd.colors = o3d.utility.Vector3dVector(full_colors)
+            geometries.append(scene_pcd)
+
+        # --- Segmented object (red-tinted, same as before) ---
+        if seg_points is not None and len(seg_points) > 0:
+            seg_pcd = o3d.geometry.PointCloud()
+            seg_pcd.points = o3d.utility.Vector3dVector(seg_points)
+            red = np.array([1.0, 0.0, 0.0])
+            tinted = seg_colors * 0.6 + red * 0.4
+            seg_pcd.colors = o3d.utility.Vector3dVector(np.clip(tinted, 0, 1))
+            geometries.append(seg_pcd)
+
+        # --- Robot base frame ---
+        robot_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15)
+        geometries.append(robot_frame)
+
+        # Reuse the same helpers from _visualize_before_execution
+        def make_arrow(origin, direction, length=0.06, color=[1, 0, 0],
+                       cyl_r=0.003, cone_r=0.006, cone_frac=0.3):
+            cyl_h = length * (1 - cone_frac)
+            cone_h = length * cone_frac
+            arrow = o3d.geometry.TriangleMesh.create_arrow(
+                cylinder_radius=cyl_r, cone_radius=cone_r,
+                cylinder_height=cyl_h, cone_height=cone_h,
+                resolution=8, cylinder_split=1, cone_split=1,
+            )
+            arrow.paint_uniform_color(color)
+            arrow.compute_vertex_normals()
+            direction = direction / np.linalg.norm(direction)
+            z = np.array([0.0, 0.0, 1.0])
+            v = np.cross(z, direction)
+            s = np.linalg.norm(v)
+            c = np.dot(z, direction)
+            if s < 1e-8:
+                R = np.eye(3) if c > 0 else np.diag([-1.0, -1.0, 1.0])
+            else:
+                vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+                R = np.eye(3) + vx + vx @ vx * (1 - c) / (s * s)
+            T = np.eye(4)
+            T[:3, :3] = R
+            T[:3, 3] = origin
+            arrow.transform(T)
+            return arrow
+
+        def make_pose_axes(transform_4x4, axis_len=0.08, cyl_r=0.004,
+                          cone_r=0.008, label_color=None, label_r=0.012):
+            axis_colors = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+            origin = transform_4x4[:3, 3]
+            rot = transform_4x4[:3, :3]
+            meshes = []
+            for i, col in enumerate(axis_colors):
+                meshes.append(make_arrow(origin, rot[:, i], length=axis_len,
+                                         color=col, cyl_r=cyl_r, cone_r=cone_r))
+            if label_color is not None:
+                sp = o3d.geometry.TriangleMesh.create_sphere(radius=label_r)
+                sp.paint_uniform_color(label_color)
+                sp.compute_vertex_normals()
+                sp.translate(origin)
+                meshes.append(sp)
+            return meshes
+
+        def make_fingers(grasp_4x4, color, width=0.08, depth=0.05, thick=0.012):
+            pos = grasp_4x4[:3, 3]
+            rot = grasp_4x4[:3, :3]
+            meshes = []
+            for sign in [1, -1]:
+                box = o3d.geometry.TriangleMesh.create_box(width=thick, height=thick, depth=depth)
+                box.paint_uniform_color(color)
+                box.compute_vertex_normals()
+                box_center = np.array([thick / 2, thick / 2, depth / 2])
+                T = np.eye(4)
+                T[:3, :3] = rot
+                T[:3, 3] = pos + rot[:, 1] * sign * (width / 2) - rot @ box_center
+                box.transform(T)
+                meshes.append(box)
+            palm = o3d.geometry.TriangleMesh.create_box(width=thick, height=width, depth=thick)
+            palm.paint_uniform_color(color)
+            palm.compute_vertex_normals()
+            palm_center = np.array([thick / 2, width / 2, thick / 2])
+            T_palm = np.eye(4)
+            T_palm[:3, :3] = rot
+            T_palm[:3, 3] = pos - rot @ palm_center
+            palm.transform(T_palm)
+            meshes.append(palm)
+            return meshes
+
+        purple = [0.6, 0.0, 1.0]
+
+        # --- Target grasp (purple) — where we wanted the robot to go ---
+        if best_grasp is not None:
+            geometries.extend(make_pose_axes(
+                best_grasp, axis_len=0.08, cyl_r=0.004, cone_r=0.008,
+                label_color=purple, label_r=0.015,
+            ))
+            geometries.extend(make_fingers(best_grasp, color=[0.5, 0.2, 0.8]))
+
+            # Target approach arrow
+            target_z = best_grasp[:3, :3][:, 2]
+            geometries.append(make_arrow(
+                best_grasp[:3, 3], target_z, length=0.08,
+                color=purple, cyl_r=0.004, cone_r=0.008,
+            ))
+
+        # --- Actual EEF (cyan) — where the robot actually is now ---
+        try:
+            state = self.env.get_robot_state()
+            eef_pose = np.array(state["TCPPose"])
+            eef_pos_m = eef_pose[:3] / 1000.0
+            eef_rot = spt.Rotation.from_euler("xyz", eef_pose[3:], degrees=True)
+            eef_transform = np.eye(4)
+            eef_transform[:3, :3] = eef_rot.as_matrix()
+            eef_transform[:3, 3] = eef_pos_m
+
+            geometries.extend(make_pose_axes(
+                eef_transform, axis_len=0.08, cyl_r=0.004, cone_r=0.008,
+                label_color=[0.0, 1.0, 1.0], label_r=0.015,
+            ))
+            geometries.extend(make_fingers(eef_transform, color=[0.0, 0.8, 0.8]))
+
+            # Log the error between target and actual
+            if best_grasp is not None:
+                pos_error = np.linalg.norm(eef_pos_m - best_grasp[:3, 3]) * 1000  # mm
+                target_rot = spt.Rotation.from_matrix(best_grasp[:3, :3])
+                rot_error = (eef_rot * target_rot.inv()).magnitude() * 180 / np.pi  # deg
+                logger.info(f"Execution error:")
+                logger.info(f"  Position error: {pos_error:.1f} mm")
+                logger.info(f"  Orientation error: {rot_error:.1f} deg")
+        except Exception as e:
+            logger.warning(f"Could not get EEF pose for after-visualization: {e}")
+
+        # --- Show ---
+        logger.info("AFTER visualization: Purple=target grasp, Cyan=actual EEF position")
+        logger.info("Close the window to continue.")
+        o3d.visualization.draw_geometries(
+            geometries,
+            window_name=f"After Execution: '{prompt}' — Purple=target, Cyan=actual",
+            width=1280, height=720,
+        )
+        logger.info("After-visualization closed.")
+
+    def _filter_and_select_best_grasp(self, grasps, grasp_scores):
+        """
+        Filter grasps and select the best one (closest to current EEF).
+
+        Pipeline:
+        1. Filter: gripper clearance buffer vs table (z=0)
+        2. Filter: confidence threshold (>= 80%)
+        3. Normalize: gripper Z-symmetry (pick 180-flip closer to current EEF)
+        4. Select: closest to current EEF position (least movement)
 
         Args:
             grasps: Nx4x4 numpy array of grasp poses in robot frame (meters)
             grasp_scores: N numpy array of GraspGen confidence scores [0-1]
-            object_points: Mx3 numpy array of object points (for reference)
 
         Returns:
-            tuple: (best_idx, best_grasp, original_score, combined_scores)
+            tuple: (best_idx, best_grasp, best_score, grasps, scores)
+                   Returns (None, None, None, None, None) if no grasps survive filtering
         """
-        # Extract grasp positions (in meters)
-        grasp_positions = grasps[:, :3, 3]  # Nx3
+        import scipy.spatial.transform as st
 
-        # 1. Normalize GraspGen scores to [0, 1]
-        score_min = grasp_scores.min()
-        score_max = grasp_scores.max()
-        if score_max > score_min:
-            normalized_scores = (grasp_scores - score_min) / (score_max - score_min)
+        n_initial = len(grasps)
+        logger.info(f"  {n_initial} grasps to select from (scores: {grasp_scores.min():.3f} - {grasp_scores.max():.3f})")
+
+        # --- Get current EEF pose ---
+        eef_transform = None
+        try:
+            state = self.env.get_robot_state()
+            eef_pose = np.array(state["TCPPose"], dtype=np.float32)
+            eef_pos_m = eef_pose[:3] / 1000.0  # mm -> m
+            eef_rot = st.Rotation.from_euler("xyz", eef_pose[3:], degrees=True)
+            eef_transform = np.eye(4)
+            eef_transform[:3, :3] = eef_rot.as_matrix()
+            eef_transform[:3, 3] = eef_pos_m
+            logger.info(f"  Current EEF: [{eef_pos_m[0]:.3f}, {eef_pos_m[1]:.3f}, {eef_pos_m[2]:.3f}] m")
+        except Exception as e:
+            logger.warning(f"  Could not get EEF pose: {e}")
+
+        # --- Normalize: Gripper Z-symmetry ---
+        # Parallel gripper is symmetric under 180 deg rotation around Z (approach).
+        # Pick whichever orientation (original or +180 around Z) is closer to EEF.
+        if eef_transform is not None:
+            Rz180 = np.eye(4)
+            Rz180[0, 0] = -1
+            Rz180[1, 1] = -1  # 180 deg around Z
+
+            eef_rot_scipy = st.Rotation.from_matrix(eef_transform[:3, :3])
+            n_flipped = 0
+            for i in range(len(grasps)):
+                rot_orig = st.Rotation.from_matrix(grasps[i, :3, :3])
+                rot_flip = rot_orig * st.Rotation.from_matrix(Rz180[:3, :3])
+                delta_orig = (rot_orig * eef_rot_scipy.inv()).magnitude()
+                delta_flip = (rot_flip * eef_rot_scipy.inv()).magnitude()
+                if delta_flip < delta_orig:
+                    grasps[i] = grasps[i] @ Rz180
+                    n_flipped += 1
+            logger.info(f"  Z-symmetry: flipped {n_flipped}/{len(grasps)} grasps to reduce rotation from EEF")
+
+        # --- Select best: prefer more vertical grasps, then closest to EEF ---
+        # "Top-down" = approach axis (Z column of grasp) aligned with world -Z.
+        # Compute dot product of grasp Z-axis with [0, 0, -1]. Perfect top-down = 1.0.
+        down = np.array([0.0, 0.0, -1.0])
+        topdown_scores = np.array([np.dot(g[:3, 2], down) for g in grasps])
+
+        # Keep the top 50% most vertical grasps (relative filter — always keeps half,
+        # works whether grasps are top-down, angled, or horizontal)
+        topdown_threshold = np.median(topdown_scores)
+        topdown_mask = topdown_scores >= topdown_threshold
+        n_topdown = topdown_mask.sum()
+        logger.info(f"  Vertical preference: keeping {n_topdown}/{len(grasps)} grasps above median alignment ({topdown_threshold:.3f})")
+
+        if eef_transform is not None:
+            eef_pos = eef_transform[:3, 3]
+            distances = np.linalg.norm(grasps[:, :3, 3] - eef_pos, axis=1)
+
+            # From the more vertical half, pick closest to EEF
+            masked_distances = np.where(topdown_mask, distances, np.inf)
+            best_idx = int(np.argmin(masked_distances))
+            logger.info(f"  Best grasp: #{best_idx} (closest to EEF from vertical set, distance={distances[best_idx]:.3f} m, alignment={topdown_scores[best_idx]:.3f})")
         else:
-            normalized_scores = np.ones_like(grasp_scores)
+            # No EEF available — from the more vertical half, pick highest confidence
+            masked_scores = np.where(topdown_mask, grasp_scores, -1)
+            best_idx = int(np.argmax(masked_scores))
+            logger.info(f"  Best grasp: #{best_idx} (highest score from vertical set, alignment={topdown_scores[best_idx]:.3f})")
 
-        # 2. Height score: prefer higher Z positions (top-down grasps)
-        # Normalize heights relative to object
-        object_z_min = object_points[:, 2].min()
-        object_z_max = object_points[:, 2].max()
-        grasp_z = grasp_positions[:, 2]
-
-        if object_z_max > object_z_min:
-            # Height score: 1.0 for highest grasp, 0.0 for lowest
-            height_scores = (grasp_z - object_z_min) / (object_z_max - object_z_min)
-        else:
-            height_scores = np.ones(len(grasps))
-
-        # 3. Distance score: prefer grasps closer to robot base (0, 0, 0)
-        # Distance in XY plane (ignore Z for reachability)
-        xy_distances = np.linalg.norm(grasp_positions[:, :2], axis=1)
-
-        # Normalize: closer = higher score
-        max_dist = xy_distances.max()
-        min_dist = xy_distances.min()
-        if max_dist > min_dist:
-            # Invert: 1.0 for closest, 0.0 for farthest
-            distance_scores = 1.0 - (xy_distances - min_dist) / (max_dist - min_dist)
-        else:
-            distance_scores = np.ones(len(grasps))
-
-        # Combine scores with weights
-        # Adjust these weights to change priorities:
-        weight_quality = 0.6    # GraspGen confidence (most important)
-        weight_height = 0.25    # Prefer top-down grasps
-        weight_distance = 0.15  # Prefer closer grasps (avoid over-reaching)
-
-        combined_scores = (
-            weight_quality * normalized_scores +
-            weight_height * height_scores +
-            weight_distance * distance_scores
-        )
-
-        # Select best grasp
-        best_idx = np.argmax(combined_scores)
         best_grasp = grasps[best_idx]
-        original_score = grasp_scores[best_idx]
+        best_score = grasp_scores[best_idx]
 
-        # Log selection details
-        logger.info(f"\n🎯 Grasp Selection (out of {len(grasps)} candidates):")
-        logger.info(f"   Selected grasp #{best_idx}")
-        logger.info(f"   GraspGen score: {original_score:.3f} (rank: {np.argsort(grasp_scores)[::-1].tolist().index(best_idx) + 1}/{len(grasps)})")
-        logger.info(f"   Height: {grasp_z[best_idx]:.3f}m (normalized: {height_scores[best_idx]:.3f})")
-        logger.info(f"   XY distance from base: {xy_distances[best_idx]:.3f}m (score: {distance_scores[best_idx]:.3f})")
-        logger.info(f"   Combined score: {combined_scores[best_idx]:.3f}")
-        logger.info(f"   Weights: quality={weight_quality}, height={weight_height}, distance={weight_distance}")
+        best_pos = best_grasp[:3, 3]
+        best_euler = st.Rotation.from_matrix(best_grasp[:3, :3]).as_euler("xyz", degrees=True)
+        logger.info(f"  Position: [{best_pos[0]:.3f}, {best_pos[1]:.3f}, {best_pos[2]:.3f}] m")
+        logger.info(f"  Orientation: [{best_euler[0]:.1f}, {best_euler[1]:.1f}, {best_euler[2]:.1f}] deg")
+        logger.info(f"  Score: {best_score:.3f}")
 
-        # Show comparison with pure quality-based selection
-        pure_quality_idx = np.argmax(grasp_scores)
-        if pure_quality_idx != best_idx:
-            logger.info(f"\n   Note: Pure quality-based would select grasp #{pure_quality_idx}")
-            logger.info(f"         (score: {grasp_scores[pure_quality_idx]:.3f}, height: {grasp_z[pure_quality_idx]:.3f}m, dist: {xy_distances[pure_quality_idx]:.3f}m)")
-
-        return best_idx, best_grasp, original_score, combined_scores
+        return best_idx, best_grasp, best_score, grasps, grasp_scores
 
     def _generate_grasps_on_pointcloud(self, points):
         """
         Generate grasps on a point cloud using GraspGen.
-        Same logic as gg_test.py.
+
+        Pipeline:
+        1. Downsample if too many points (outlier removal is O(N^2) memory)
+        2. Center point cloud (GraspGen expects centered input)
+        3. Remove outliers
+        4. Run GraspGen inference
+        5. Un-center grasps back to robot frame
+        6. Apply gripper frame correction (GraspGen -> robot TCP convention)
 
         Args:
-            points: Nx3 numpy array of 3D points in robot frame
+            points: Nx3 numpy array of 3D points in robot frame (meters)
 
         Returns:
-            tuple: (grasps, grasp_scores) - 4x4 transformation matrices and confidence scores
+            tuple: (grasps, scores) - Nx4x4 poses in robot frame, N confidence scores
                    Returns (None, None) if generation fails
         """
         if self.grasp_sampler is None:
@@ -397,19 +741,33 @@ class LMPWrapper:
             return None, None
 
         try:
-            # Center point cloud (same as gg_test.py)
-            T_subtract_pc_mean = tra.translation_matrix(-points.mean(axis=0))
-            pc_centered = tra.transform_points(points, T_subtract_pc_mean)
+            import open3d as o3d
 
-            # Filter point cloud to remove outliers (same as gg_test.py)
+            # Downsample if too many points (outlier removal uses O(N^2) memory)
+            max_points = 5000
+            if len(points) > max_points:
+                logger.info(f"Downsampling {len(points)} -> ~{max_points} points (voxel grid)")
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(points)
+                bbox = pcd.get_axis_aligned_bounding_box()
+                volume = np.prod(bbox.get_extent())
+                voxel_size = (volume / max_points) ** (1.0 / 3.0)
+                pcd_down = pcd.voxel_down_sample(voxel_size)
+                points = np.asarray(pcd_down.points)
+                logger.info(f"After downsampling: {len(points)} points (voxel_size={voxel_size:.4f} m)")
+
+            # Center point cloud (GraspGen expects centered input)
+            pc_mean = points.mean(axis=0)
+            pc_centered = points - pc_mean
+
+            # Remove outliers
             pc_filtered, pc_removed = point_cloud_outlier_removal(
                 torch.from_numpy(pc_centered)
             )
             pc_filtered = pc_filtered.numpy()
+            logger.info(f"Point cloud: {len(pc_filtered)} kept, {len(pc_removed.numpy())} outliers removed")
 
-            logger.info(f"Point cloud filtering: {len(pc_filtered)} points kept, {len(pc_removed.numpy())} outliers removed")
-
-            # Run GraspGen inference (same as gg_test.py)
+            # Run GraspGen inference
             grasps_inferred, grasp_conf_inferred = GraspGenSampler.run_inference(
                 pc_filtered,
                 self.grasp_sampler,
@@ -422,22 +780,30 @@ class LMPWrapper:
                 logger.warning("GraspGen returned no valid grasps")
                 return None, None
 
-            # Convert to numpy and ensure proper format
+            # Convert to numpy
             grasp_conf_inferred = grasp_conf_inferred.cpu().numpy()
             grasps_inferred = grasps_inferred.cpu().numpy()
             grasps_inferred[:, 3, 3] = 1  # Ensure homogeneous coordinate
 
-            # Transform grasps back to original coordinate frame
-            # (undo the centering transformation)
-            T_add_pc_mean = tra.translation_matrix(points.mean(axis=0))
-            grasps_centered_robot = np.array([T_add_pc_mean @ g for g in grasps_inferred])
+            # Un-center: shift grasps back to robot frame
+            T_add_mean = tra.translation_matrix(pc_mean)
+            grasps_robot = np.array([T_add_mean @ g for g in grasps_inferred])
 
-            # CRITICAL: Apply gripper frame correction
-            # GraspGen outputs grasps in its own convention (fingers along X)
-            # But real robot has fingers along Y, so rotate -90° around Z
-            grasps_robot_frame = np.array([g @ self.T_graspgen_to_tcp for g in grasps_centered_robot])
+            # Apply gripper frame correction: GraspGen fingers-along-X -> robot fingers-along-Y
+            # Rotate -90 deg around Z
+            grasps_robot = np.array([g @ self.T_graspgen_to_tcp for g in grasps_robot])
 
-            return grasps_robot_frame, grasp_conf_inferred
+            # Apply gripper depth offset: GraspGen was trained on Robotiq 2F-140
+            # (longer fingers) but we use a shorter xArm gripper. Shift each grasp
+            # along its own approach axis (Z column of rotation) to compensate.
+            if self.grasp_z_offset_m != 0.0:
+                for i in range(len(grasps_robot)):
+                    approach_axis = grasps_robot[i, :3, 2]  # Z column = approach direction
+                    grasps_robot[i, :3, 3] += approach_axis * self.grasp_z_offset_m
+                logger.info(f"Applied gripper depth offset: {self.grasp_z_offset_m*1000:.0f} mm along approach axis")
+
+            logger.info(f"Generated {len(grasps_robot)} raw grasps (scores: {grasp_conf_inferred.min():.3f} - {grasp_conf_inferred.max():.3f})")
+            return grasps_robot, grasp_conf_inferred
 
         except Exception as e:
             logger.error(f"Error generating grasps: {e}")
@@ -873,12 +1239,30 @@ class LMPWrapper:
             logger.info(f"goto_pos() called with position only: {position_xyz_or_pose}")
             logger.info(f"  Keeping current orientation: [{target_orientation[0]:.1f}, {target_orientation[1]:.1f}, {target_orientation[2]:.1f}]")
 
-        return self._move_to_pose(
+        result = self._move_to_pose(
             target_position=target_position.tolist(),
             target_orientation=target_orientation,
             duration=duration,
             stage_val=stage_val,
         )
+
+        # Show "after" visualization only when we've actually reached the grasp pose
+        # (not the approach pose which is 100mm above). Compare target position to
+        # the stored best_grasp position — only trigger if they match within 5mm.
+        if self._last_viz_data is not None:
+            d = self._last_viz_data
+            grasp_pos_mm = d["best_grasp"][:3, 3] * 1000.0  # meters -> mm
+            target_pos_mm = np.array(target_position[:3], dtype=np.float64)
+            if np.linalg.norm(grasp_pos_mm - target_pos_mm) < 5.0:
+                self._visualize_after_execution(
+                    d["full_points"], d["full_colors"],
+                    d["seg_points"], d["seg_colors"],
+                    d["grasps"], d["scores"],
+                    d["best_idx"], d["best_grasp"], d["prompt"],
+                )
+                self._last_viz_data = None  # Only show once
+
+        return result
 
     def goto_xy(self, position_xy, duration=2.0, stage_val=0):
         """
@@ -1348,20 +1732,18 @@ class LMPWrapper:
         print("MOVING TO", target_position)
         try:
             target_pose = np.array(
-                target_position + target_orientation, dtype=np.float32
+                target_position + target_orientation, dtype=np.float64
             )
 
-            # Get current pose - same as teleop script
+            # Get current pose from robot
             state = self.env.get_robot_state()
-            start_pose = np.array(state["TCPPose"], dtype=np.float32)
+            start_pose = np.array(state["TCPPose"], dtype=np.float64)
 
-            # DEBUG: Print what we're sending
-            logger.info(f"\n🔍 DEBUG: _move_to_pose() execution:")
-            logger.info(f"   Start pose: {start_pose.tolist()}")
-            logger.info(f"   Target pose: {target_pose.tolist()}")
+            logger.info(f"_move_to_pose():")
+            logger.info(f"   Start: {start_pose[:3].tolist()}")
+            logger.info(f"   Target: {target_pose[:3].tolist()}")
             logger.info(f"   Start orientation: [{start_pose[3]:.1f}, {start_pose[4]:.1f}, {start_pose[5]:.1f}]")
             logger.info(f"   Target orientation: [{target_pose[3]:.1f}, {target_pose[4]:.1f}, {target_pose[5]:.1f}]")
-            logger.info(f"   Orientation delta: [{target_pose[3]-start_pose[3]:.1f}, {target_pose[4]-start_pose[4]:.1f}, {target_pose[5]-start_pose[5]:.1f}]")
 
             # Calculate interpolation steps
             interpolation_steps = int(duration * self._frequency)
@@ -1467,8 +1849,19 @@ class LMPWrapper:
             logger.error(f"Error during relative movement: {e}")
             return False
 
-    def _set_gripper(self, grasp_value, stage_val=0):
-        """Internal gripper control function using teleop script logic."""
+    def _set_gripper(self, grasp_value, stage_val=0, settle_time=1.5):
+        """Internal gripper control function.
+        
+        Sends the gripper command and holds position while the gripper
+        physically closes/opens. The Robotiq gripper takes ~1-2s to fully
+        close, so we keep sending hold-position commands with the new grasp
+        value for settle_time seconds.
+
+        Args:
+            grasp_value: 0.0 = open, 1.0 = closed
+            stage_val: Stage value for actions
+            settle_time: Time in seconds to hold position while gripper moves (default 1.5s)
+        """
         try:
             # Update grasp state
             self._current_grasp = float(grasp_value)
@@ -1477,20 +1870,28 @@ class LMPWrapper:
             state = self.env.get_robot_state()
             current_pose = np.array(state["TCPPose"], dtype=np.float32)
 
-            # Send command with current pose - same as teleop script
             action = np.concatenate([current_pose, [self._current_grasp]])
 
-            # Use same timing logic as teleop
-            t_command_target = time.monotonic() + self._dt
-            exec_timestamp = t_command_target - time.monotonic() + time.time()
+            # Send hold-position + gripper command for the full settle duration.
+            # This ensures the gripper has time to physically close/open while
+            # the robot stays in place.
+            steps = int(settle_time * self._frequency)
+            t_start = time.monotonic()
 
-            self.env.exec_actions(
-                actions=[action],
-                timestamps=[exec_timestamp],
-                stages=[stage_val],
-            )
+            for iter_idx in range(steps):
+                t_cycle_end = t_start + (iter_idx + 1) * self._dt
+                t_command_target = t_cycle_end + self._dt
 
-            logger.debug(f"Gripper set to: {self._current_grasp}")
+                exec_timestamp = t_command_target - time.monotonic() + time.time()
+                self.env.exec_actions(
+                    actions=[action],
+                    timestamps=[exec_timestamp],
+                    stages=[stage_val],
+                )
+
+                self._precise_wait(t_cycle_end)
+
+            logger.info(f"Gripper {'closed' if grasp_value >= 0.5 else 'opened'} (value={self._current_grasp}, held {settle_time:.1f}s)")
             return True
 
         except Exception as e:

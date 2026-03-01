@@ -6,8 +6,8 @@ lmp_config:
   lmps:
     tabletop_ui:
       prompt_fname: tabletop_ui_prompt
-      model: gpt-4.1-nano
-      max_tokens: 1024
+      model: gpt-5-nano
+      max_tokens: 16384
       temperature: 0
       query_prefix: "# Query: "
       query_suffix: "."
@@ -23,8 +23,8 @@ lmp_config:
     
     parse_obj_name:
       prompt_fname: parse_obj_name_prompt
-      model: gpt-4.1-nano
-      max_tokens: 1024 
+      model: gpt-5-nano
+      max_tokens: 16384 
       temperature: 0
       query_prefix: "# "
       query_suffix: "."
@@ -39,8 +39,8 @@ lmp_config:
 
     parse_position:
       prompt_fname: parse_position_prompt
-      model: gpt-4.1-nano
-      max_tokens: 1024 
+      model: gpt-5-nano
+      max_tokens: 16384 
       temperature: 0
       query_prefix: "# "
       query_suffix: "."
@@ -54,8 +54,8 @@ lmp_config:
 
     parse_question:
       prompt_fname: parse_question_prompt
-      model: gpt-4.1-nano
-      max_tokens: 1024 
+      model: gpt-5-nano
+      max_tokens: 16384 
       temperature: 0
       query_prefix: "# "
       query_suffix: "."
@@ -70,8 +70,8 @@ lmp_config:
 
     transform_shape_pts:
       prompt_fname: transform_shape_pts_prompt
-      model: gpt-4.1-nano
-      max_tokens: 1024 
+      model: gpt-5-nano
+      max_tokens: 16384 
       temperature: 0
       query_prefix: "# "
       query_suffix: "."
@@ -85,8 +85,8 @@ lmp_config:
 
     fgen:
       prompt_fname: fgen_prompt
-      model: gpt-4.1-nano
-      max_tokens: 1024
+      model: gpt-5-nano
+      max_tokens: 16384
       temperature: 0
       query_prefix: "# define function: "
       query_suffix: "."
