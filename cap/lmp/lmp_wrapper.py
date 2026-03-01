@@ -113,7 +113,7 @@ class LMPWrapper:
     def _setup_lmp_environment(self):
         """Setup LMP-specific environment variables and object tracking."""
         # Mock object tracking (replace with actual computer vision)
-        self.known_objects = ["bread", "red ball", "white bottle", "red cup", "blue hot glue gun"]
+        self.known_objects = ["bread", "red ball", "white bottle", "red cup", "tissue box"]
         # Stored visualization data for before/after comparison
         self._last_viz_data = None
 
@@ -722,12 +722,14 @@ class LMPWrapper:
         Generate grasps on a point cloud using GraspGen.
 
         Pipeline:
-        1. Downsample if too many points (outlier removal is O(N^2) memory)
-        2. Center point cloud (GraspGen expects centered input)
-        3. Remove outliers
-        4. Run GraspGen inference
-        5. Un-center grasps back to robot frame
-        6. Apply gripper frame correction (GraspGen -> robot TCP convention)
+        1. Statistical outlier removal (remove scattered noise from depth/segmentation)
+        2. DBSCAN clustering (keep only largest cluster — removes mask bleeding)
+        3. Downsample if too many points (outlier removal is O(N^2) memory)
+        4. Center point cloud (GraspGen expects centered input)
+        5. GraspGen's own outlier removal (KNN-based)
+        6. Run GraspGen inference
+        7. Un-center grasps back to robot frame
+        8. Apply gripper frame correction (GraspGen -> robot TCP convention)
 
         Args:
             points: Nx3 numpy array of 3D points in robot frame (meters)
@@ -743,7 +745,46 @@ class LMPWrapper:
         try:
             import open3d as o3d
 
-            # Downsample if too many points (outlier removal uses O(N^2) memory)
+            logger.info(f"Pre-processing segmented point cloud: {len(points)} raw points")
+
+            # --- Step 1: Statistical outlier removal ---
+            # Removes scattered noise from depth sensor / stereo matching edges
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(points)
+            pcd_clean, stat_inlier_idx = pcd.remove_statistical_outlier(
+                nb_neighbors=20, std_ratio=2.0
+            )
+            n_stat_removed = len(points) - len(pcd_clean.points)
+            logger.info(f"  Statistical outlier removal: {len(points)} -> {len(pcd_clean.points)} ({n_stat_removed} removed)")
+
+            # --- Step 2: DBSCAN clustering — keep only largest cluster ---
+            # Removes disconnected blobs from SAM mask bleeding into background
+            if len(pcd_clean.points) > 10:
+                labels = np.array(pcd_clean.cluster_dbscan(
+                    eps=0.015,  # 15mm neighborhood radius
+                    min_points=10,
+                    print_progress=False,
+                ))
+                if len(labels) > 0 and labels.max() >= 0:
+                    # Find largest cluster
+                    unique_labels, counts = np.unique(labels[labels >= 0], return_counts=True)
+                    largest_label = unique_labels[counts.argmax()]
+                    cluster_mask = labels == largest_label
+                    n_before_cluster = len(pcd_clean.points)
+                    pcd_clean = pcd_clean.select_by_index(np.where(cluster_mask)[0])
+                    n_cluster_removed = n_before_cluster - len(pcd_clean.points)
+                    logger.info(f"  DBSCAN clustering: kept largest cluster ({len(pcd_clean.points)} points, {n_cluster_removed} from smaller clusters removed)")
+                else:
+                    logger.info(f"  DBSCAN clustering: no valid clusters found, keeping all points")
+
+            points = np.asarray(pcd_clean.points)
+            logger.info(f"  After pre-processing: {len(points)} clean points")
+
+            if len(points) == 0:
+                logger.warning("No points remaining after pre-processing")
+                return None, None
+
+            # Downsample if too many points (GraspGen outlier removal uses O(N^2) memory)
             max_points = 5000
             if len(points) > max_points:
                 logger.info(f"Downsampling {len(points)} -> ~{max_points} points (voxel grid)")
@@ -760,12 +801,12 @@ class LMPWrapper:
             pc_mean = points.mean(axis=0)
             pc_centered = points - pc_mean
 
-            # Remove outliers
+            # GraspGen's own KNN-based outlier removal
             pc_filtered, pc_removed = point_cloud_outlier_removal(
                 torch.from_numpy(pc_centered)
             )
             pc_filtered = pc_filtered.numpy()
-            logger.info(f"Point cloud: {len(pc_filtered)} kept, {len(pc_removed.numpy())} outliers removed")
+            logger.info(f"  GraspGen outlier removal: {len(pc_filtered)} kept, {len(pc_removed.numpy())} removed")
 
             # Run GraspGen inference
             grasps_inferred, grasp_conf_inferred = GraspGenSampler.run_inference(
