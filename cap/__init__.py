@@ -1,11 +1,8 @@
 """
-Cap - Multi-Camera Point Cloud Capture Package
+Cap - Multi-Camera Point Cloud Capture & Robot Control Package
 
-This package provides tools for capturing and merging point clouds from
-multiple RealSense cameras, with optional AI-powered segmentation.
+Provides perception, grasp generation, motion control, and LMP interfaces
+for tabletop manipulation with the xArm robot.
 """
 
-from .pc import RobotFrameMerger as BasicMerger
-
-__all__ = ["BasicMerger"]
 __version__ = "1.0.0"

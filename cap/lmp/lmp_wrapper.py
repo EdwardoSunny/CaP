@@ -4,11 +4,12 @@ LMP Wrapper — thin API surface for LLM-generated robot commands.
 Delegates to:
 - cap.motion.XArmMotionController   — robot motion
 - cap.grasp.GraspGenStrategy         — grasp generation (swappable)
-- cap.perception.SAMCLIPPerception   — object segmentation (swappable)
+- cap.perception.SAMMolmoPerception  — object segmentation (Molmo + SAM2)
 - cap.pipeline.GraspPipeline         — orchestration
 - cap.viz.GraspVisualizer            — visualization
 """
 
+import os
 import time
 import numpy as np
 import scipy.spatial.transform as st
@@ -25,8 +26,9 @@ from cap.motion.base import MotionController
 from cap.motion.xarm_motion import XArmMotionController
 from cap.grasp.base import GraspStrategy, GraspResult
 from cap.grasp.graspgen_strategy import GraspGenStrategy
+from cap.grasp.hardcode_strategy import HardcodeStrategy
 from cap.perception.base import PerceptionModule
-from cap.perception.sam_clip_perception import SAMCLIPPerception
+from cap.perception.sam_clip_perception import SAMMolmoPerception
 from cap.pipeline import GraspPipeline
 from cap.viz.visualization import GraspVisualizer
 
@@ -85,9 +87,17 @@ class LMPWrapper:
     def _setup_lmp_environment(self, known_objects=None):
         """Setup LMP-specific environment variables and object tracking."""
         self.known_objects = known_objects or [
-            "bread", "red ball", "white bottle", "red cup", "tissue box",
+            "bread", "red ball", "white bottle", "red cup", "tissue box", "screwdriver",
         ]
         self._last_viz_data = None
+
+        # Global position offset applied to every detected object position.
+        # Units: millimeters. [dx, dy, dz] in robot base frame.
+        # Adjust these to compensate for systematic perception errors.
+        #   +X = further from robot, -X = closer to robot
+        #   +Y = robot's left,      -Y = robot's right
+        #   +Z = up,                 -Z = down (deeper grasp)
+        self.detection_offset_mm = np.array([0.0, 0.0, 30.0])
 
         self.workspace_bounds = {
             "x_min": -0.3, "x_max": 0.3,
@@ -164,10 +174,13 @@ class LMPWrapper:
         if grasp_pose is None:
             return None
 
+        # Apply global detection offset
+        grasp_pose[:3] += self.detection_offset_mm
+
         position_mm = grasp_pose[:3]
         orientation_deg = grasp_pose[3:]
 
-        logger.info(f"Best grasp pose for robot:")
+        logger.info(f"Best grasp pose for robot (after offset {self.detection_offset_mm.tolist()} mm):")
         logger.info(f"  Position (mm): [{position_mm[0]:.1f}, {position_mm[1]:.1f}, {position_mm[2]:.1f}]")
         logger.info(f"  Orientation (deg): [{orientation_deg[0]:.1f}, {orientation_deg[1]:.1f}, {orientation_deg[2]:.1f}]")
         logger.info(f"  Score: {grasp_result.best_score:.3f}")
@@ -251,8 +264,8 @@ class LMPWrapper:
             stage_val=stage_val,
         )
 
-        # After-visualization: only when we've reached the grasp pose (within 5mm)
-        if self._last_viz_data is not None and self.visualizer is not None:
+        # After-visualization: disabled — set ENABLE_GRASP_VIZ=1 to re-enable
+        if self._last_viz_data is not None and self.visualizer is not None and os.environ.get("ENABLE_GRASP_VIZ"):
             d = self._last_viz_data
             if d["best_grasp"] is not None:
                 grasp_pos_mm = d["best_grasp"][:3, 3] * 1000.0
@@ -530,13 +543,12 @@ def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen"):
     logger.info("Init Success")
     logger.info("=" * 60)
 
-    # --- 2. Perception ---
-    perception = SAMCLIPPerception(
+    # --- 2. Perception (Molmo + SAM2) ---
+    perception = SAMMolmoPerception(
         camera_serials=["327122079374", "317222072157"],
         calib_file=str(project_root / "transforms" / "transforms.npy"),
         sam2_checkpoint=str(project_root / "ckpt" / "sam2.1_hiera_large.pt"),
         sam2_config="sam2.1/sam2.1_hiera_l",
-        clip_model_name="laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
     )
 
     # --- 3. Grasp strategy ---
@@ -548,6 +560,8 @@ def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen"):
             / "graspgen_robotiq_2f_140.yml"
         )
         strategy = GraspGenStrategy(gripper_config)
+    elif grasp_strategy == "hardcode":
+        strategy = HardcodeStrategy()
     else:
         raise ValueError(f"Unknown grasp strategy: {grasp_strategy}")
 

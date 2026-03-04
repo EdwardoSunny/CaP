@@ -9,6 +9,7 @@
 # - All distances are in MILLIMETERS (100mm = 10cm = 0.1m)
 # - move_up(distance) and move_down(distance) take distance in MILLIMETERS
 # - Positions are in robot base frame (origin at robot base)
+# - NEVER add code to return to a neutral/home position. Only generate code to complete the task.
 #
 import numpy as np
 from env_utils import put_first_on_second, get_obj_pos, get_obj_names, say, get_corner_name, get_side_name, is_obj_visible, stack_objects_in_order

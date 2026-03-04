@@ -21,13 +21,36 @@ from cap.lmp.utils import load_prompt
 def _strip_echoed_query(text, use_query):
     """Strip the echoed query line from the start of model output.
     
-    The Responses API models often echo back the query/prompt prefix.
-    The old Chat Completions API didn't do this because the prompt was
-    a separate message. Remove it so stop-token trimming works correctly.
+    The Responses API models often echo back the query/prompt prefix,
+    sometimes with minor rephrasing (e.g. "screw driver" → "screwdriver").
+    We strip it by:
+    1. Exact prefix match (original behaviour).
+    2. If the query has a known prefix pattern (e.g. "# Query: "), strip any
+       first line that starts with that prefix — handles rephrased echoes.
     """
     stripped = text.strip()
+    # Exact match
     if use_query and stripped.startswith(use_query.strip()):
         stripped = stripped[len(use_query.strip()):].strip()
+        return stripped
+    # Fuzzy: strip any leading line that starts with the query prefix
+    # (e.g. "# Query: " or "# "). This handles rephrased echoes.
+    if use_query:
+        # Find the prefix pattern: everything up to and including ": " or just "# "
+        prefix = use_query.strip()
+        # Try common prefixes like "# Query: ", "# ", "# define function: "
+        for sep in [": ", " "]:
+            idx = prefix.find(sep)
+            if idx != -1:
+                prefix_pattern = prefix[:idx + len(sep)]
+                if stripped.startswith(prefix_pattern):
+                    # Strip everything up to the first newline
+                    newline_idx = stripped.find("\n")
+                    if newline_idx != -1:
+                        stripped = stripped[newline_idx + 1:].strip()
+                    else:
+                        stripped = ""  # entire response was just the echo
+                    return stripped
     return stripped
 
 

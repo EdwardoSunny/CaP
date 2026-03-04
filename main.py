@@ -55,14 +55,14 @@ def main(
             time.sleep(1)
 
             config = load_config("configs/real_config.yaml")
-            lmp_tabletop_ui, lmp_env = setup_LMP(config, env, xarm_config)
+            lmp_tabletop_ui, lmp_env = setup_LMP(config, env, xarm_config, grasp_strategy="hardcode")
 
             logger.info("=" * 60)
             logger.info("Init Success")
             logger.info("=" * 60)
 
             lmp_tabletop_ui(
-                "pick up the bread",
+                "pick up the bread and drop it to the far right of the screw driver",
                 f"objects = {lmp_env.get_obj_names()}",
             )
 

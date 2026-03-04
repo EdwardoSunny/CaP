@@ -6,6 +6,7 @@ decoupling perception, grasp strategy, and visualization into swappable componen
 """
 
 import logging
+import os
 from typing import Optional
 
 import numpy as np
@@ -81,8 +82,8 @@ class GraspPipeline:
         grasp_result.scene_points = perception_result.scene_points
         grasp_result.scene_colors = perception_result.scene_colors
 
-        # 3. Visualization (if available)
-        if self.visualizer is not None and grasp_result.success:
+        # 3. Visualization (disabled — set ENABLE_GRASP_VIZ=1 to re-enable)
+        if self.visualizer is not None and grasp_result.success and os.environ.get("ENABLE_GRASP_VIZ"):
             try:
                 self.visualizer.visualize_before_execution(
                     full_points=perception_result.scene_points,

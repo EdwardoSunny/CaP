@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
-Simple script to capture from both cameras, transform to robot frame, merge, and segment.
-This does exactly what pc.py does but adds SAM+CLIP segmentation to extract specific objects.
+Capture from multiple RealSense cameras, transform to robot frame, merge,
+and segment objects using Molmo (VLM point prediction) + SAM2 (automatic masks).
+
+Pipeline per camera:
+1. Capture aligned RGB + depth.
+2. Run SAM2AutomaticMaskGenerator to produce all candidate masks unconditionally.
+3. Send RGB to Molmo API → get (x, y) point(s) on the target object.
+4. Use Molmo points to vote on which auto-generated mask corresponds to the object.
+5. Apply the selected mask to select 3D points belonging to the object.
 """
 
+import base64
+import io
+import logging
+import re
 import numpy as np
 import pyrealsense2 as rs
 import os
@@ -11,6 +22,7 @@ import sys
 import time
 import torch
 from PIL import Image
+from openai import OpenAI
 
 # Handle both package import and direct script execution
 try:
@@ -25,7 +37,6 @@ sys.path.insert(
 
 from sam2.build_sam import build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
-from transformers import AutoModel, AutoProcessor
 
 try:
     import open3d as o3d
@@ -35,43 +46,158 @@ except ImportError:
     HAS_OPEN3D = False
     print("Open3D not available. Will save as text file.")
 
+logger = logging.getLogger(__name__)
 
-# --- Segmentation Helper Functions ---
+# ---------------------------------------------------------------------------
+# Molmo VLM helpers
+# ---------------------------------------------------------------------------
 
-
-def extract_segmented_objects(image, masks):
-    """Extract segmented objects from image using masks"""
-    segmented_objects = []
-    for mask in masks:
-        mask_3d = np.stack([mask, mask, mask], axis=-1)
-        segmented = image * mask_3d
-        segmented_objects.append(segmented)
-    return segmented_objects
+# Default Molmo endpoint — override via MOLMO_BASE_URL env var
+MOLMO_BASE_URL = os.environ.get("MOLMO_BASE_URL", "http://scai4.cs.ucla.edu:8000/v1")
+MOLMO_MODEL = os.environ.get("MOLMO_MODEL", "allenai/Molmo2-8B")
 
 
-def find_best_matching_mask_index(
-    segmented_images, text_prompt, model, processor, device
-):
-    """Find the mask that best matches the text prompt using CLIP"""
-    if not segmented_images:
-        return None
-    inputs = processor(
-        text=[text_prompt], images=segmented_images, return_tensors="pt", padding=True
-    )
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    with torch.no_grad():
-        outputs = model(**inputs)
-        similarities = torch.cosine_similarity(
-            outputs.image_embeds, outputs.text_embeds, dim=1
+def _encode_image_to_base64(image_rgb: np.ndarray) -> str:
+    """Encode an HWC uint8 RGB numpy image to a base64 JPEG string."""
+    pil_img = Image.fromarray(image_rgb)
+    buf = io.BytesIO()
+    pil_img.save(buf, format="JPEG", quality=90)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def _parse_molmo_points(response_text: str) -> list[tuple[float, float]]:
+    """Parse Molmo ``<points>`` tags and return list of (norm_x, norm_y) in [0, 1000].
+
+    Molmo returns points like:
+        Single point:  <points coords="x1 y1">description</points>
+        Multi-point:   <points coords="x1 y1 x2 y2 ...">description</points>
+
+    Known quirks handled:
+    - Molmo often prepends a ``(1, 1)`` corner artifact. Stripped when other
+      real points exist (any number >= 15).
+    - When asked for multiple points, Molmo sometimes interleaves index numbers
+      (1, 2, 3...) in the coordinate list. Stripped via ``n >= 15`` filter.
+
+    Also handles bare ``<point>`` tags:
+        <point x="123" y="456" alt="...">description</point>
+    """
+    points = []
+
+    # <points coords="x1 y1 x2 y2 ...">
+    for match in re.finditer(r'<points coords="([^"]+)">', response_text):
+        raw_nums = list(map(float, match.group(1).split()))
+
+        # Filter out small index numbers that Molmo interleaves
+        # (e.g. "500 510 2 630 533 3 ..." or "1 1 380 85").
+        # Valid coordinates are typically >= 15 in the 0-1000 grid.
+        # Always filter; if nothing survives >= 15, fall back to raw.
+        filtered = [n for n in raw_nums if n >= 15]
+        if len(filtered) >= 2:
+            nums = filtered
+        else:
+            nums = raw_nums
+
+        # Pair up remaining numbers
+        points.extend((nums[i], nums[i + 1]) for i in range(0, len(nums) - 1, 2))
+
+    # <point x="..." y="..." ...>
+    for match in re.finditer(r'<point x="([^"]+)" y="([^"]+)"', response_text):
+        points.append((float(match.group(1)), float(match.group(2))))
+
+    return points
+
+
+def _query_molmo_single_point(
+    b64: str,
+    text_prompt: str,
+    client: OpenAI,
+    model: str,
+    call_idx: int,
+) -> list[tuple[float, float]]:
+    """Send a single Molmo request asking for one point. Returns parsed points."""
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"Point at the {text_prompt}"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                        },
+                    ],
+                }
+            ],
+            max_tokens=128,
         )
-    best_idx = similarities.argmax().item()
-    print(f"CLIP Similarity Scores: {similarities.cpu().numpy().round(2)}")
-    print(f"Best match is index {best_idx} with score {similarities[best_idx]:.3f}")
-    return best_idx
+        raw = response.choices[0].message.content or ""
+        logger.info(f"Molmo call #{call_idx} response: {raw}")
+        return _parse_molmo_points(raw)
+    except Exception as e:
+        logger.error(f"Molmo call #{call_idx} failed: {e}")
+        return []
+
+
+def query_molmo_for_points(
+    image_rgb: np.ndarray,
+    text_prompt: str,
+    base_url: str = MOLMO_BASE_URL,
+    model: str = MOLMO_MODEL,
+    n_calls: int = 6,
+) -> list[tuple[float, float]]:
+    """Ask Molmo to point at *text_prompt* in *image_rgb*.
+
+    Fires *n_calls* independent single-point requests in parallel (via threads)
+    to get diverse, independent point predictions. Each call asks Molmo to
+    point at the object once, avoiding the multi-point index-interleaving issue.
+
+    Returns list of (norm_x, norm_y) in the 0-1000 Molmo coordinate space.
+    Empty list if all calls fail or Molmo finds nothing.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    client = OpenAI(base_url=base_url, api_key="not-needed")
+    b64 = _encode_image_to_base64(image_rgb)
+
+    all_points: list[tuple[float, float]] = []
+
+    with ThreadPoolExecutor(max_workers=n_calls) as pool:
+        futures = {
+            pool.submit(_query_molmo_single_point, b64, text_prompt, client, model, i): i
+            for i in range(n_calls)
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                pts = future.result()
+                all_points.extend(pts)
+            except Exception as e:
+                logger.error(f"Molmo call #{idx} raised: {e}")
+
+    logger.info(f"Molmo: {len(all_points)} points from {n_calls} parallel calls")
+    return all_points
+
+
+def molmo_points_to_pixel(
+    molmo_points: list[tuple[float, float]], img_w: int, img_h: int
+) -> np.ndarray:
+    """Convert Molmo normalised-1000 points to pixel coords (Nx2, XY order)."""
+    if not molmo_points:
+        return np.empty((0, 2), dtype=np.float32)
+    arr = np.array(molmo_points, dtype=np.float32)
+    arr[:, 0] = arr[:, 0] / 1000.0 * img_w
+    arr[:, 1] = arr[:, 1] / 1000.0 * img_h
+    return arr
 
 
 class RobotFrameMerger:
-    """Merge point clouds from multiple cameras in robot coordinate frame with segmentation"""
+    """Merge point clouds from multiple cameras in robot coordinate frame with segmentation.
+
+    Uses SAM2AutomaticMaskGenerator for unconditional mask generation, then
+    Molmo (VLM) points to vote on which mask corresponds to the target object.
+    """
 
     def __init__(
         self,
@@ -79,22 +205,18 @@ class RobotFrameMerger:
         calib_file,
         max_depth=2.0,
         min_depth=0.1,
-        sam_generator=None,
-        clip_model=None,
-        clip_processor=None,
+        sam_mask_generator=None,
         device="cuda",
     ):
         """
-        Initialize RobotFrameMerger with segmentation support
+        Initialize RobotFrameMerger with SAM2 automatic masks + Molmo voting.
 
         Args:
             camera_serials: List of camera serial numbers
             calib_file: Path to calibration transforms file (transforms.npy)
             max_depth: Maximum depth in meters (default: 2.0)
             min_depth: Minimum depth in meters (default: 0.1)
-            sam_generator: SAM2 mask generator (optional, for segmentation)
-            clip_model: CLIP model (optional, for segmentation)
-            clip_processor: CLIP processor (optional, for segmentation)
+            sam_mask_generator: SAM2AutomaticMaskGenerator instance (optional, for segmentation)
             device: Device for models ('cuda' or 'cpu')
         """
         self.camera_serials = camera_serials
@@ -103,9 +225,7 @@ class RobotFrameMerger:
         self.min_depth = min_depth
 
         # Segmentation models
-        self.sam_generator = sam_generator
-        self.clip_model = clip_model
-        self.clip_processor = clip_processor
+        self.sam_mask_generator = sam_mask_generator
         self.device = device
 
         # Load calibration transforms
@@ -192,7 +312,14 @@ class RobotFrameMerger:
                 rgb_sensor.set_option(rs.option.enable_auto_exposure, 1)
 
     def capture_single_camera(self, serial, text_prompt=None):
-        """Capture point cloud from a single camera with optional segmentation"""
+        """Capture point cloud from a single camera with optional SAM auto-mask + Molmo voting.
+
+        When *text_prompt* is provided the pipeline is:
+        1. Run SAM2AutomaticMaskGenerator on the RGB image → all candidate masks.
+        2. Send the RGB image to Molmo asking it to point at the object → pixel points.
+        3. Vote: select the auto-generated mask that contains the most Molmo points.
+        4. Apply the selected mask to select 3D points belonging to the object.
+        """
         camera_data = self.cameras[serial]
         pipeline = camera_data["pipeline"]
         filters = camera_data["filters"]
@@ -205,7 +332,7 @@ class RobotFrameMerger:
         color_frame = frames.get_color_frame()
 
         if not depth_frame or not color_frame:
-            print(f"Failed to capture from camera {serial}")
+            logger.warning(f"Failed to capture from camera {serial}")
             return None
 
         # Apply filters
@@ -240,104 +367,72 @@ class RobotFrameMerger:
             & np.isfinite(points_3d).all(axis=1)
         )
 
-        # Apply segmentation if text_prompt is provided
-        if text_prompt and self.sam_generator and self.clip_model:
-            print(f"Camera {serial}: Applying segmentation for '{text_prompt}'...")
+        # ----- SAM automatic masks + Molmo voting -----
+        if text_prompt and self.sam_mask_generator:
+            logger.info(f"Camera {serial}: Segmenting '{text_prompt}' via SAM auto-masks + Molmo voting...")
 
-            # Convert color image for SAM (BGR to RGB)
+            # Convert BGR -> RGB for SAM and Molmo
             color_image_rgb = color_image[:, :, ::-1].copy()
 
-            # Run SAM to get masks
-            print(f"  Running SAM on image from camera {serial}...")
-            masks_data = self.sam_generator.generate(color_image_rgb)
+            # Step 1: Generate ALL masks unconditionally with SAM2
+            logger.info(f"  Running SAM2 automatic mask generation...")
+            sam_results = self.sam_mask_generator.generate(color_image_rgb)
+            logger.info(f"  SAM2 generated {len(sam_results)} masks")
 
-            masks = None
+            # Extract masks and scores from auto-generated results
+            # Each result dict has: segmentation (HxW bool), predicted_iou, stability_score, area, bbox
+            all_masks = np.array([r["segmentation"] for r in sam_results]) if sam_results else None
+            all_scores = np.array([r["predicted_iou"] for r in sam_results]) if sam_results else None
+
+            target_mask = None
             best_mask_idx = None
 
-            if not masks_data:
-                print(f"  Warning: SAM found no masks for camera {serial}")
+            # Step 2: Ask Molmo where the object is
+            logger.info(f"  Querying Molmo for '{text_prompt}'...")
+            molmo_pts = query_molmo_for_points(color_image_rgb, text_prompt)
+
+            if not molmo_pts:
+                logger.warning(f"  Molmo returned no points for '{text_prompt}'")
+            elif all_masks is None or len(all_masks) == 0:
+                logger.warning(f"  SAM2 generated no masks")
             else:
-                masks = np.array([m["segmentation"] for m in masks_data])
-                print(f"  Found {len(masks)} masks")
+                # Step 3: Convert normalised coords to pixel coords
+                pixel_points = molmo_points_to_pixel(molmo_pts, w, h)
+                logger.info(f"  Molmo returned {len(pixel_points)} points, voting across {len(all_masks)} masks...")
 
-                # Run CLIP to find best matching mask
-                print(f"  Running CLIP to find '{text_prompt}'...")
-                segmented_images = extract_segmented_objects(color_image_rgb, masks)
-                best_mask_idx = find_best_matching_mask_index(
-                    segmented_images,
-                    text_prompt,
-                    self.clip_model,
-                    self.clip_processor,
-                    self.device,
-                )
+                # Vote: pick the mask that contains the most Molmo points
+                px_int = pixel_points.astype(int)
+                px_x = np.clip(px_int[:, 0], 0, w - 1)
+                px_y = np.clip(px_int[:, 1], 0, h - 1)
 
-            # --- Always visualize: original image, SAM masks, CLIP selection ---
-            try:
-                import cv2 as _cv2
+                point_counts = []
+                for mi in range(len(all_masks)):
+                    m = all_masks[mi].astype(bool)
+                    count = m[px_y, px_x].sum()
+                    point_counts.append(count)
+                point_counts = np.array(point_counts)
 
-                n_masks = len(masks) if masks is not None else 0
+                best_mask_idx = int(np.argmax(point_counts))
+                target_mask = all_masks[best_mask_idx]
+                logger.info(f"  Selected mask #{best_mask_idx}/{len(all_masks)} "
+                             f"({point_counts[best_mask_idx]}/{len(pixel_points)} Molmo pts, "
+                             f"iou={all_scores[best_mask_idx]:.3f}, "
+                             f"area={sam_results[best_mask_idx]['area']}px)")
 
-                # Build the three panels
-                img_h, img_w = color_image_rgb.shape[:2]
+            # --- Debug visualisation ---
+            self._show_segmentation_debug(
+                serial, color_image_rgb, text_prompt,
+                molmo_pts, all_masks, all_scores, best_mask_idx,
+            )
 
-                # 1) Original image (RGB -> BGR for cv2)
-                panel_orig = np.ascontiguousarray(color_image_rgb[:, :, ::-1])
-                _cv2.putText(panel_orig, f"Camera {serial}", (10, 30),
-                             _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                _cv2.putText(panel_orig, "Original", (10, 60),
-                             _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-                # 2) All SAM masks overlay
-                if masks is not None and n_masks > 0:
-                    overlay = color_image_rgb.copy()
-                    np.random.seed(42)
-                    for mi in range(n_masks):
-                        color_rand = np.random.randint(60, 255, 3).tolist()
-                        overlay[masks[mi]] = (overlay[masks[mi]] * 0.4 + np.array(color_rand) * 0.6).astype(np.uint8)
-                    panel_masks = np.ascontiguousarray(overlay[:, :, ::-1])  # RGB -> BGR
-                else:
-                    panel_masks = np.ascontiguousarray(color_image_rgb[:, :, ::-1])
-                _cv2.putText(panel_masks, f"SAM: {n_masks} masks", (10, 30),
-                             _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-                # 3) CLIP-selected mask
-                if best_mask_idx is not None and masks is not None:
-                    selected = color_image_rgb.copy()
-                    green = np.array([0, 255, 0], dtype=np.uint8)
-                    selected[masks[best_mask_idx]] = (selected[masks[best_mask_idx]] * 0.4 + green * 0.6).astype(np.uint8)
-                    # Red contour
-                    from scipy import ndimage
-                    contour = ndimage.binary_dilation(masks[best_mask_idx]) ^ masks[best_mask_idx]
-                    selected[contour] = [255, 0, 0]
-                    panel_clip = np.ascontiguousarray(selected[:, :, ::-1])  # RGB -> BGR
-                    clip_label = f"CLIP: #{best_mask_idx} '{text_prompt}'"
-                else:
-                    panel_clip = np.ascontiguousarray(color_image_rgb[:, :, ::-1])
-                    clip_label = f"CLIP: NO MATCH for '{text_prompt}'"
-                _cv2.putText(panel_clip, clip_label, (10, 30),
-                             _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-
-                # Concatenate horizontally
-                combined = np.hstack([panel_orig, panel_masks, panel_clip])
-                window_name = f"Segmentation Debug - Camera {serial} - Close to continue"
-                _cv2.imshow(window_name, combined)
-                print(f"  Showing segmentation debug window. Press any key to continue...")
-                _cv2.waitKey(0)
-                _cv2.destroyWindow(window_name)
-            except Exception as viz_e:
-                print(f"  Warning: Could not show segmentation visualization: {viz_e}")
-                import traceback
-                traceback.print_exc()
-
-            # Apply mask result
-            if best_mask_idx is not None and masks is not None:
-                target_mask = masks[best_mask_idx]
-                point_in_segment_mask = target_mask[v, u]
+            # Step 4: Apply mask to select 3D points
+            if target_mask is not None:
+                point_in_segment_mask = target_mask[v, u].astype(bool)
                 segmentation_mask = valid_mask & point_in_segment_mask
                 n_seg_pts = segmentation_mask.sum()
-                print(f"  Segmentation mask applied ({n_seg_pts} points in segment)")
+                logger.info(f"  Segmentation mask applied ({n_seg_pts} points in segment)")
             else:
-                print(f"  Warning: No valid mask selected, using all valid points")
+                logger.warning(f"  No valid mask obtained, using all valid points")
                 segmentation_mask = valid_mask
         else:
             segmentation_mask = valid_mask
@@ -345,9 +440,118 @@ class RobotFrameMerger:
         valid_points = points_3d[segmentation_mask]
         valid_colors = colors[segmentation_mask]
 
-        print(f"Camera {serial}: {len(valid_points)} valid points captured")
+        logger.info(f"Camera {serial}: {len(valid_points)} valid points captured")
 
         return valid_points, valid_colors
+
+    def _show_segmentation_debug(
+        self, serial, color_image_rgb, text_prompt,
+        molmo_pts, all_masks, all_scores, best_mask_idx,
+    ):
+        """Show interactive segmentation debug window with three panels:
+
+        1. Original image + Molmo point(s) drawn as red dots
+        2. All SAM auto-generated masks overlaid (colour-coded, up to 20 shown)
+        3. The selected (best) mask highlighted in green with red contour
+
+        The window blocks until the user presses a key or closes it.
+        Also saves a PNG backup to ``segmentation_debug_cam_{serial}.png``.
+        """
+        try:
+            import cv2 as _cv2
+            from scipy import ndimage
+
+            img_h, img_w = color_image_rgb.shape[:2]
+
+            # ---- Panel 1: Original image + Molmo points ----
+            panel_orig = np.ascontiguousarray(color_image_rgb[:, :, ::-1])  # RGB->BGR
+            _cv2.putText(panel_orig, f"Camera {serial}", (10, 30),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            _cv2.putText(panel_orig, f"'{text_prompt}'", (10, 60),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+
+            if molmo_pts:
+                pixel_points = molmo_points_to_pixel(molmo_pts, img_w, img_h)
+                for px, py in pixel_points:
+                    _cv2.circle(panel_orig, (int(px), int(py)), 8, (0, 0, 255), -1)
+                    _cv2.circle(panel_orig, (int(px), int(py)), 10, (255, 255, 255), 2)
+                _cv2.putText(panel_orig, f"Molmo: {len(molmo_pts)} pt(s)", (10, 90),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            else:
+                _cv2.putText(panel_orig, "Molmo: NO POINTS", (10, 90),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+            # ---- Panel 2: All SAM auto-generated masks ----
+            if all_masks is not None and len(all_masks) > 0:
+                overlay = color_image_rgb.copy()
+                # Use a larger colour palette for many auto-generated masks
+                np.random.seed(42)  # deterministic colours
+                n_masks = len(all_masks)
+                mask_colors = []
+                for i in range(n_masks):
+                    hue = int(180 * i / max(n_masks, 1))
+                    hsv = np.uint8([[[hue, 200, 220]]])
+                    bgr = _cv2.cvtColor(hsv, _cv2.COLOR_HSV2BGR)[0, 0]
+                    mask_colors.append(tuple(int(c) for c in bgr[::-1]))  # BGR->RGB
+
+                # Sort by area ascending so smaller masks are drawn on top
+                order = np.argsort([all_masks[i].sum() for i in range(n_masks)])
+                # Only draw up to 20 masks to keep viz readable
+                drawn = 0
+                for mi in reversed(order):
+                    if drawn >= 20:
+                        break
+                    m = all_masks[mi].astype(bool)
+                    c = np.array(mask_colors[mi], dtype=np.uint8)
+                    overlay[m] = (overlay[m] * 0.45 + c * 0.55).astype(np.uint8)
+                    contour = ndimage.binary_dilation(m) ^ m
+                    overlay[contour] = c
+                    drawn += 1
+
+                panel_masks = np.ascontiguousarray(overlay[:, :, ::-1])
+                label = f"SAM auto: {n_masks} masks"
+                if best_mask_idx is not None:
+                    label += f" | sel=#{best_mask_idx}"
+                _cv2.putText(panel_masks, label, (10, 30),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+            else:
+                panel_masks = np.ascontiguousarray(color_image_rgb[:, :, ::-1])
+                _cv2.putText(panel_masks, "SAM: NO MASKS", (10, 30),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+            # ---- Panel 3: Selected (best) mask ----
+            if all_masks is not None and best_mask_idx is not None:
+                selected = color_image_rgb.copy()
+                mask_bool = all_masks[best_mask_idx].astype(bool)
+                green = np.array([0, 255, 0], dtype=np.uint8)
+                selected[mask_bool] = (selected[mask_bool] * 0.4 + green * 0.6).astype(np.uint8)
+                contour = ndimage.binary_dilation(mask_bool) ^ mask_bool
+                selected[contour] = [255, 0, 0]
+                panel_selected = np.ascontiguousarray(selected[:, :, ::-1])
+                sel_label = f"Selected: #{best_mask_idx} (iou={all_scores[best_mask_idx]:.3f})"
+            else:
+                panel_selected = np.ascontiguousarray(color_image_rgb[:, :, ::-1])
+                sel_label = f"NO MASK for '{text_prompt}'"
+            _cv2.putText(panel_selected, sel_label, (10, 30),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+
+            # ---- Combine and show ----
+            combined = np.hstack([panel_orig, panel_masks, panel_selected])
+
+            # Save PNG backup
+            out_path = f"segmentation_debug_cam_{serial}.png"
+            _cv2.imwrite(out_path, combined)
+            logger.info(f"  Debug viz saved to {out_path}")
+
+            # Interactive window disabled — PNG backup is saved above.
+            # To re-enable: uncomment the lines below.
+            # window_name = f"Segmentation - Camera {serial} - Press any key"
+            # _cv2.imshow(window_name, combined)
+            # logger.info(f"  Showing segmentation debug for camera {serial}. Press any key to continue...")
+            # _cv2.waitKey(0)
+            # _cv2.destroyWindow(window_name)
+        except Exception as viz_e:
+            logger.warning(f"  Could not show segmentation visualization: {viz_e}")
 
     def transform_to_robot_frame(self, points, camera_serial):
         """Transform points from camera coordinates to robot coordinates"""
@@ -516,25 +720,19 @@ class RobotFrameMerger:
         print("All cameras stopped")
 
 
-def load_segmentation_models(sam2_checkpoint, sam2_config, clip_model_name, device="cuda"):
+def load_sam_mask_generator(sam2_checkpoint, sam2_config, device="cuda"):
     """
-    Load SAM2 and CLIP models for segmentation
+    Load SAM2 automatic mask generator for unconditional mask generation.
 
     Args:
         sam2_checkpoint: Path to SAM2 checkpoint file
         sam2_config: Path to SAM2 config YAML file (or just "sam2.1/sam2.1_hiera_l")
-        clip_model_name: HuggingFace model name for CLIP
-        device: Device to load models on ('cuda' or 'cpu')
+        device: Device to load model on ('cuda' or 'cpu')
 
     Returns:
-        tuple: (sam_generator, clip_model, clip_processor)
+        SAM2AutomaticMaskGenerator instance
     """
-    print("Loading CLIP model...")
-    clip_model = AutoModel.from_pretrained(clip_model_name).to(device)
-    clip_processor = AutoProcessor.from_pretrained(clip_model_name)
-    print("CLIP model loaded.")
-
-    print("Loading SAM2 model...")
+    print("Loading SAM2 model for automatic mask generation...")
 
     # Handle both Path objects and strings, convert to proper format for build_sam2
     from pathlib import Path
@@ -543,28 +741,17 @@ def load_segmentation_models(sam2_checkpoint, sam2_config, clip_model_name, devi
 
     # If given an absolute/relative path, need to change directory for Hydra
     if sam2_config_path.is_absolute() or str(sam2_config_path).startswith('..'):
-        # Need to use the config relative to CaP root
-        # Extract just the config name for Hydra
         original_dir = os.getcwd()
 
-        # Find project root (CaP/) - go up from configs/sam2.1/xxx.yaml
         if sam2_config_path.is_absolute():
-            # Path like: /home/.../CaP/configs/sam2.1/sam2.1_hiera_l.yaml
-            # We want:   /home/.../CaP/
-            config_root = sam2_config_path.parent.parent.parent  # .../sam2.1_hiera_l.yaml -> sam2.1/ -> configs/ -> CaP/
+            config_root = sam2_config_path.parent.parent.parent
         else:
-            # Relative path like: ../configs/sam2.1/sam2.1_hiera_l.yaml
             config_root = Path(original_dir) / sam2_config_path.parent.parent.parent
             config_root = config_root.resolve()
 
         os.chdir(config_root)
 
-        # Use relative config path from CaP root
-        # configs/sam2.1/sam2.1_hiera_l.yaml -> sam2.1/sam2.1_hiera_l
         config_name = f"{sam2_config_path.parent.name}/{sam2_config_path.stem}"
-
-        # Checkpoint path relative to CaP root
-        # /home/.../CaP/ckpt/sam2.1_hiera_large.pt -> ckpt/sam2.1_hiera_large.pt
         checkpoint_path = str(sam2_checkpoint_path.relative_to(config_root))
 
         sam2 = build_sam2(
@@ -573,11 +760,11 @@ def load_segmentation_models(sam2_checkpoint, sam2_config, clip_model_name, devi
 
         os.chdir(original_dir)
     else:
-        # Already in correct format
         sam2 = build_sam2(
             str(sam2_config), str(sam2_checkpoint), apply_postprocessing=False, device=device
         )
-    sam_generator = SAM2AutomaticMaskGenerator(
+
+    mask_generator = SAM2AutomaticMaskGenerator(
         model=sam2,
         points_per_side=32,
         points_per_batch=128,
@@ -585,39 +772,40 @@ def load_segmentation_models(sam2_checkpoint, sam2_config, clip_model_name, devi
         stability_score_thresh=0.95,
         min_mask_region_area=200.0,
     )
-    print("SAM2 model loaded.")
+    print("SAM2 automatic mask generator loaded.")
 
-    return sam_generator, clip_model, clip_processor
+    return mask_generator
+
+
+# Keep backward-compatible alias
+load_sam_predictor = load_sam_mask_generator
 
 
 def main():
     """
-    Main function - example usage when running as standalone script
+    Main function - example usage when running as standalone script.
 
-    When importing as a package, use load_segmentation_models() and RobotFrameMerger:
+    When importing as a package, use load_sam_mask_generator() and RobotFrameMerger:
 
         from pathlib import Path
-        from cap.segment_pc import RobotFrameMerger, load_segmentation_models
+        from cap.segment_pc import RobotFrameMerger, load_sam_mask_generator
 
-        # Load segmentation models
-        sam_gen, clip_model, clip_proc = load_segmentation_models(
+        # Load SAM2 automatic mask generator
+        mask_gen = load_sam_mask_generator(
             sam2_checkpoint=Path("ckpt/sam2.1_hiera_large.pt"),
             sam2_config=Path("configs/sam2.1/sam2.1_hiera_l.yaml"),
-            clip_model_name="laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
             device="cuda"
         )
 
-        # Create merger
+        # Create merger (SAM auto-masks + Molmo voting when text_prompt is given)
         merger = RobotFrameMerger(
-            camera_serials=["327122079374", "317422074281"],
+            camera_serials=["327122079374", "317222072157"],
             calib_file=Path("transforms/transforms.npy"),
-            sam_generator=sam_gen,
-            clip_model=clip_model,
-            clip_processor=clip_proc,
+            sam_mask_generator=mask_gen,
             device="cuda"
         )
 
-        # Capture with segmentation
+        # Capture with SAM auto-masks + Molmo voting segmentation
         points, colors = merger.capture_merged_pointcloud(text_prompt="cup")
     """
     from pathlib import Path
@@ -627,47 +815,43 @@ def main():
     project_root = script_dir.parent
 
     # Configuration
-    camera_serials = ["327122079374", "317422074281"]
+    camera_serials = ["327122079374", "317222072157"]
     calib_file = project_root / "transforms" / "transforms.npy"
     max_depth = 2.0  # meters
     min_depth = 0.1  # meters
 
     # Segmentation settings
-    TEXT_PROMPT = "Orange disinfecting wipes"  # Set to None to disable segmentation
+    TEXT_PROMPT = "tissue box"  # Set to None to disable segmentation
     sam2_checkpoint = project_root / "ckpt" / "sam2.1_hiera_large.pt"
     sam2_config = project_root / "configs" / "sam2.1" / "sam2.1_hiera_l.yaml"
-    clip_model_name = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
 
     print(f"Camera serials: {camera_serials}")
     print(f"Calibration file: {calib_file}")
     print(f"Depth range: {min_depth}m to {max_depth}m")
     print(
-        f"Depth exposure: {'AUTO' if DEPTH_EXPOSURE is None else f'{DEPTH_EXPOSURE} µs'}"
+        f"Depth exposure: {'AUTO' if DEPTH_EXPOSURE is None else f'{DEPTH_EXPOSURE} us'}"
     )
     print(
-        f"RGB exposure: {'AUTO' if RGB_EXPOSURE is None else f'{RGB_EXPOSURE} µs'}"
+        f"RGB exposure: {'AUTO' if RGB_EXPOSURE is None else f'{RGB_EXPOSURE} us'}"
     )
     if TEXT_PROMPT:
         print(f"Segmentation: '{TEXT_PROMPT}'")
 
-    # Initialize segmentation models if text prompt is provided
-    sam_generator = None
-    clip_model = None
-    clip_processor = None
+    # Initialize SAM2 automatic mask generator
+    sam_mask_generator = None
     device = "cpu"
 
     if TEXT_PROMPT:
-        print("\nInitializing segmentation models...")
+        print("\nInitializing SAM2 automatic mask generator...")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {device}")
 
-        sam_generator, clip_model, clip_processor = load_segmentation_models(
+        sam_mask_generator = load_sam_mask_generator(
             sam2_checkpoint=sam2_checkpoint,
             sam2_config=sam2_config,
-            clip_model_name=clip_model_name,
-            device=device
+            device=device,
         )
-        print("All models initialized successfully.")
+        print("SAM2 automatic mask generator initialized.")
 
     try:
         # Initialize merger
@@ -677,15 +861,13 @@ def main():
             calib_file=calib_file,
             max_depth=max_depth,
             min_depth=min_depth,
-            sam_generator=sam_generator,
-            clip_model=clip_model,
-            clip_processor=clip_processor,
+            sam_mask_generator=sam_mask_generator,
             device=device,
         )
 
         # Capture merged point cloud
         merged_points, merged_colors = merger.capture_merged_pointcloud(
-            text_prompt=TEXT_PROMPT  # Set to None to disable segmentation
+            text_prompt=TEXT_PROMPT
         )
 
         if merged_points is not None:
