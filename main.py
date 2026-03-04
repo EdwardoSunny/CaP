@@ -62,7 +62,7 @@ def main(
             logger.info("=" * 60)
 
             lmp_tabletop_ui(
-                "pick up the tissue box",
+                "pick up the bread",
                 f"objects = {lmp_env.get_obj_names()}",
             )
 
