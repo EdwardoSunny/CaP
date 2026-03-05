@@ -70,11 +70,67 @@ def _trim_at_stop_tokens(text, stop_tokens):
     return text[:earliest]
 
 
+def _build_openai_client(cfg):
+    """Build OpenAI-compatible client from LMP config.
+
+    Supports both OpenAI-hosted models and OpenAI-compatible OSS servers.
+    """
+    base_url = cfg.get("base_url", None)
+    api_key = cfg.get("api_key", None)
+
+    if base_url:
+        if api_key is None:
+            api_key = "not-needed"
+        return OpenAI(base_url=base_url, api_key=api_key)
+
+    if api_key is not None:
+        return OpenAI(api_key=api_key)
+
+    return OpenAI()
+
+
+def _request_model_text(client, cfg, prompt, instructions):
+    """Request model output text using configured API mode."""
+    model = cfg.get("model", "gpt-5-nano")
+    api_mode = cfg.get("api_mode", "responses")
+
+    if api_mode == "chat_completions":
+        messages = []
+        if instructions:
+            messages.append({"role": "system", "content": instructions})
+        messages.append({"role": "user", "content": prompt})
+
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": cfg["max_tokens"],
+        }
+        if "temperature" in cfg:
+            kwargs["temperature"] = cfg["temperature"]
+
+        response = client.chat.completions.create(**kwargs)
+        return response.choices[0].message.content or "", response
+
+    kwargs = {
+        "model": model,
+        "instructions": instructions,
+        "input": prompt,
+        "max_output_tokens": cfg["max_tokens"],
+    }
+
+    reasoning_effort = cfg.get("reasoning_effort", "low")
+    if reasoning_effort:
+        kwargs["reasoning"] = {"effort": reasoning_effort}
+
+    response = client.responses.create(**kwargs)
+    return response.output_text or "", response
+
+
 class LMP:
     def __init__(self, name, cfg, lmp_fgen, fixed_vars, variable_vars):
         self._name = name
         self._cfg = cfg
-        self._client = OpenAI()  # Initialize OpenAI client
+        self._client = _build_openai_client(cfg)
 
         env = "real"
 
@@ -116,17 +172,16 @@ class LMP:
     def _generate_code_from_prompt(self, prompt, use_query):
         while True:
             try:
-                response = self._client.responses.create(
-                    model=self._cfg.get("model", "gpt-5-nano"),
-                    instructions="You are a helpful assistant that pays attention to the user's instructions and writes good python code for operating a robot arm in a tabletop environment. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran. Do not repeat my code, just complete/continue from my code. Do not import any packages that aren't already there, you should never use the import keyword since all packages you need are already imported in the examples.",
-                    input=prompt,
-                    reasoning={"effort": "low"},
-                    max_output_tokens=self._cfg["max_tokens"],
+                raw_text, response = _request_model_text(
+                    self._client,
+                    self._cfg,
+                    prompt,
+                    "You are a helpful assistant that pays attention to the user's instructions and writes good python code for operating a robot arm in a tabletop environment. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran. Do not repeat my code, just complete/continue from my code. Do not import any packages that aren't already there, you should never use the import keyword since all packages you need are already imported in the examples.",
                 )
 
-                raw_text = response.output_text or ""
+                status = getattr(response, "status", "n/a")
                 print(
-                    f"[DEBUG LMP {self._name}] status={response.status}, output_text length={len(raw_text)}"
+                    f"[DEBUG LMP {self._name}] status={status}, output_text length={len(raw_text)}"
                 )
                 print(f"[DEBUG LMP {self._name}] raw response:\n---\n{raw_text}\n---")
 
@@ -201,7 +256,7 @@ class LMP:
 class LMPFGen:
     def __init__(self, cfg, fixed_vars, variable_vars):
         self._cfg = cfg
-        self._client = OpenAI()  # Initialize OpenAI client
+        self._client = _build_openai_client(cfg)
 
         self._stop_tokens = list(self._cfg["stop"])
         self._fixed_vars = fixed_vars
@@ -219,14 +274,12 @@ class LMPFGen:
 
         while True:
             try:
-                response = self._client.responses.create(
-                    model=self._cfg.get("model", "gpt-5-nano"),
-                    instructions="You are a helpful coding assistant. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran.",
-                    input=prompt,
-                    reasoning={"effort": "low"},
-                    max_output_tokens=self._cfg["max_tokens"],
+                raw_text, _response = _request_model_text(
+                    self._client,
+                    self._cfg,
+                    prompt,
+                    "You are a helpful coding assistant. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran.",
                 )
-                raw_text = response.output_text or ""
                 print(f"[DEBUG LMPFGen] raw response:\n---\n{raw_text}\n---")
 
                 stripped = raw_text.strip()
@@ -248,14 +301,13 @@ class LMPFGen:
 
         if fix_bugs:
             try:
-                edit_response = self._client.responses.create(
-                    model=self._cfg.get("model", "gpt-5-nano"),
-                    instructions="Fix any bugs in the following code. Improve readability. Keep same inputs and outputs. Only make small changes. No comments. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran.",
-                    input=f_src,
-                    reasoning={"effort": "low"},
-                    max_output_tokens=self._cfg["max_tokens"],
+                edit_text, _edit_response = _request_model_text(
+                    self._client,
+                    self._cfg,
+                    f_src,
+                    "Fix any bugs in the following code. Improve readability. Keep same inputs and outputs. Only make small changes. No comments. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran.",
                 )
-                f_src = edit_response.output_text.strip()
+                f_src = edit_text.strip()
             except Exception as e:
                 print(f"Bug fixing failed: {e}. Using original code.")
 
