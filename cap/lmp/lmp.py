@@ -20,7 +20,7 @@ from cap.lmp.utils import load_prompt
 
 def _strip_echoed_query(text, use_query):
     """Strip the echoed query line from the start of model output.
-    
+
     The Responses API models often echo back the query/prompt prefix,
     sometimes with minor rephrasing (e.g. "screw driver" → "screwdriver").
     We strip it by:
@@ -31,7 +31,7 @@ def _strip_echoed_query(text, use_query):
     stripped = text.strip()
     # Exact match
     if use_query and stripped.startswith(use_query.strip()):
-        stripped = stripped[len(use_query.strip()):].strip()
+        stripped = stripped[len(use_query.strip()) :].strip()
         return stripped
     # Fuzzy: strip any leading line that starts with the query prefix
     # (e.g. "# Query: " or "# "). This handles rephrased echoes.
@@ -42,12 +42,12 @@ def _strip_echoed_query(text, use_query):
         for sep in [": ", " "]:
             idx = prefix.find(sep)
             if idx != -1:
-                prefix_pattern = prefix[:idx + len(sep)]
+                prefix_pattern = prefix[: idx + len(sep)]
                 if stripped.startswith(prefix_pattern):
                     # Strip everything up to the first newline
                     newline_idx = stripped.find("\n")
                     if newline_idx != -1:
-                        stripped = stripped[newline_idx + 1:].strip()
+                        stripped = stripped[newline_idx + 1 :].strip()
                     else:
                         stripped = ""  # entire response was just the echo
                     return stripped
@@ -56,7 +56,7 @@ def _strip_echoed_query(text, use_query):
 
 def _trim_at_stop_tokens(text, stop_tokens):
     """Trim text at the first occurrence of any stop token.
-    
+
     The Responses API does not support stop tokens natively,
     so we handle them in post-processing.
     """
@@ -108,14 +108,12 @@ class LMP:
         if context != "":
             prompt += f"\n{context}"
 
-        use_query = f'{self._cfg["query_prefix"]}{query}{self._cfg["query_suffix"]}'
+        use_query = f"{self._cfg['query_prefix']}{query}{self._cfg['query_suffix']}"
         prompt += f"\n{use_query}"
 
         return prompt, use_query
 
-    def __call__(self, query, context="", **kwargs):
-        prompt, use_query = self.build_prompt(query, context=context)
-        print(f"[DEBUG LMP {self._name}] prompt length: {len(prompt)} chars, use_query: {use_query!r}")
+    def _generate_code_from_prompt(self, prompt, use_query):
         while True:
             try:
                 response = self._client.responses.create(
@@ -127,15 +125,17 @@ class LMP:
                 )
 
                 raw_text = response.output_text or ""
-                print(f"[DEBUG LMP {self._name}] status={response.status}, output_text length={len(raw_text)}")
+                print(
+                    f"[DEBUG LMP {self._name}] status={response.status}, output_text length={len(raw_text)}"
+                )
                 print(f"[DEBUG LMP {self._name}] raw response:\n---\n{raw_text}\n---")
 
                 # Strip markdown code fences if model wraps output
                 stripped = raw_text.strip()
                 if stripped.startswith("```python"):
-                    stripped = stripped[len("```python"):].strip()
+                    stripped = stripped[len("```python") :].strip()
                 if stripped.startswith("```"):
-                    stripped = stripped[len("```"):].strip()
+                    stripped = stripped[len("```") :].strip()
                 if stripped.endswith("```"):
                     stripped = stripped[:-3].strip()
 
@@ -144,11 +144,31 @@ class LMP:
 
                 code_str = _trim_at_stop_tokens(stripped, self._stop_tokens)
                 print(f"[DEBUG LMP {self._name}] after trim:\n---\n{code_str}\n---")
-                break
+                return code_str
             except (RateLimitError, APIConnectionError, APIError) as e:
                 print(f"OpenAI API got err {e}")
                 print("Retrying after 10s.")
                 sleep(10)
+
+    def generate_code(self, query, context=""):
+        """Generate LMP code without executing it."""
+        prompt, use_query = self.build_prompt(query, context=context)
+        print(
+            f"[DEBUG LMP {self._name}] prompt length: {len(prompt)} chars, use_query: {use_query!r}"
+        )
+        code_str = self._generate_code_from_prompt(prompt, use_query)
+        return {
+            "prompt": prompt,
+            "use_query": use_query,
+            "code": code_str,
+        }
+
+    def __call__(self, query, context="", **kwargs):
+        prompt, use_query = self.build_prompt(query, context=context)
+        print(
+            f"[DEBUG LMP {self._name}] prompt length: {len(prompt)} chars, use_query: {use_query!r}"
+        )
+        code_str = self._generate_code_from_prompt(prompt, use_query)
 
         if self._cfg["include_context"] and context != "":
             to_exec = f"{context}\n{code_str}"
@@ -179,7 +199,6 @@ class LMP:
 
 
 class LMPFGen:
-
     def __init__(self, cfg, fixed_vars, variable_vars):
         self._cfg = cfg
         self._client = OpenAI()  # Initialize OpenAI client
@@ -195,7 +214,7 @@ class LMPFGen:
     ):
         print(f"Creating function: {f_sig}")
 
-        use_query = f'{self._cfg["query_prefix"]}{f_sig}{self._cfg["query_suffix"]}'
+        use_query = f"{self._cfg['query_prefix']}{f_sig}{self._cfg['query_suffix']}"
         prompt = f"{self._base_prompt}\n{use_query}"
 
         while True:
@@ -212,9 +231,9 @@ class LMPFGen:
 
                 stripped = raw_text.strip()
                 if stripped.startswith("```python"):
-                    stripped = stripped[len("```python"):].strip()
+                    stripped = stripped[len("```python") :].strip()
                 if stripped.startswith("```"):
-                    stripped = stripped[len("```"):].strip()
+                    stripped = stripped[len("```") :].strip()
                 if stripped.endswith("```"):
                     stripped = stripped[:-3].strip()
 
@@ -310,7 +329,6 @@ class LMPFGen:
 
 
 class FunctionParser(ast.NodeTransformer):
-
     def __init__(self, fs, f_assigns):
         super().__init__()
         self._fs = fs
