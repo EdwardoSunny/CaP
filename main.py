@@ -1,3 +1,4 @@
+import os
 import time
 import traceback
 import cv2
@@ -6,6 +7,9 @@ import scipy.spatial.transform as st
 import logging
 import pathlib
 from cap.lmp.utils import load_config
+
+# Enable grasp visualization (point cloud, masks, grasp poses)
+os.environ["ENABLE_GRASP_VIZ"] = ""
 from cap.lmp.lmp_wrapper import setup_LMP
 from multiprocessing.managers import SharedMemoryManager
 from ril_env.precise_sleep import precise_wait
@@ -62,7 +66,7 @@ def main(
             logger.info("=" * 60)
 
             lmp_tabletop_ui(
-                "pick up the bread and drop it to the far right of the screw driver",
+                "pick up the bread and put it 15 cm to the right of the rubrix cube, then put the rubrix cube on the shelf",
                 f"objects = {lmp_env.get_obj_names()}",
             )
 

@@ -4,11 +4,15 @@
 # - get_obj_pos(object_name) returns [x, y, z, roll, pitch, yaw] in MILLIMETERS and DEGREES
 #   This includes the optimal grasp pose from GraspGen (position + orientation)
 # - goto_pos(pose) accepts either:
-#   * [x, y, z] - moves to position, keeps current orientation
+#   * [x, y, z] - moves to position, default top-down orientation
 #   * [x, y, z, roll, pitch, yaw] - moves to position AND rotates to orientation
 # - All distances are in MILLIMETERS (100mm = 10cm = 0.1m)
 # - move_up(distance) and move_down(distance) take distance in MILLIMETERS
 # - Positions are in robot base frame (origin at robot base)
+# - COORDINATE CONVENTION:
+#   * +X = forward (away from robot), -X = backward (toward robot)
+#   * +Y = left,                      -Y = right
+#   * +Z = up,                        -Z = down
 # - NEVER add code to return to a neutral/home position. Only generate code to complete the task.
 #
 import numpy as np
@@ -263,6 +267,27 @@ say('Going to the bottle and moving 10cm right')
 bottle_pose = get_obj_pos('bottle')
 goto_pos(bottle_pose)
 wait(0.5)
-# Move 100mm (10cm) right while keeping orientation
-right_of_bottle = [bottle_pose[0] + 100, bottle_pose[1], bottle_pose[2], bottle_pose[3], bottle_pose[4], bottle_pose[5]]
+# Move 100mm (10cm) right (-Y direction) while keeping orientation
+right_of_bottle = [bottle_pose[0], bottle_pose[1] - 100, bottle_pose[2], bottle_pose[3], bottle_pose[4], bottle_pose[5]]
 goto_pos(right_of_bottle)
+
+objects = ['red cup', 'blue plate', 'spoon']
+# pick up the red cup and place it on the blue plate
+say('Picking up the red cup and placing it on the blue plate')
+pick_pos = get_obj_pos('red cup')
+place_pos = get_obj_pos('blue plate')
+pick_place(pick_pos, place_pos)
+
+objects = ['screwdriver', 'toolbox', 'wrench']
+# put the screwdriver in the toolbox
+say('Putting the screwdriver in the toolbox')
+pick_pos = get_obj_pos('screwdriver')
+place_pos = get_obj_pos('toolbox')
+pick_place(pick_pos, place_pos)
+
+objects = ['banana', 'apple', 'bowl']
+# move the banana to the bowl
+say('Moving the banana to the bowl')
+pick_pos = get_obj_pos('banana')
+place_pos = get_obj_pos('bowl')
+pick_place(pick_pos, place_pos)

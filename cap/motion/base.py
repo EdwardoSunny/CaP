@@ -97,3 +97,17 @@ class MotionController(ABC):
 
     def close_gripper(self, stage_val: int = 0) -> bool:
         return self.set_gripper(1.0, stage_val)
+
+    def align_gripper_yaw(self, target_yaw_deg: float, duration: float = 1.0, stage_val: int = 0) -> bool:
+        """Rotate only the gripper yaw (wrist) to *target_yaw_deg*.
+
+        Default implementation uses :meth:`move_to_pose` keeping position
+        and roll/pitch unchanged.
+        """
+        pose = self.get_robot_pose()
+        return self.move_to_pose(
+            target_position=pose[:3].tolist(),
+            target_orientation=[pose[3], pose[4], target_yaw_deg],
+            duration=duration,
+            stage_val=stage_val,
+        )

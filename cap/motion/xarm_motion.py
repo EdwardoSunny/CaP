@@ -260,6 +260,35 @@ class XArmMotionController(MotionController):
 
             self._precise_wait(t_cycle_end)
 
+    def align_gripper_yaw(self, target_yaw_deg: float, duration: float = 1.0, stage_val: int = 0) -> bool:
+        """Rotate only the gripper yaw (wrist / joint 7) to target_yaw_deg.
+
+        Reads the current TCP pose, keeps position and roll/pitch unchanged,
+        and moves only the yaw component. Because position and the other two
+        orientation axes stay identical, the xArm IK resolves this as a pure
+        joint-7 rotation.
+
+        Args:
+            target_yaw_deg: Desired TCP yaw in degrees.
+            duration: Time to complete the rotation.
+            stage_val: Stage value for action recording.
+
+        Returns:
+            True if the motion succeeded.
+        """
+        current_pose = self.get_robot_pose()  # [x, y, z, roll, pitch, yaw]
+        target_orientation = [current_pose[3], current_pose[4], target_yaw_deg]
+        logger.info(
+            f"align_gripper_yaw: rotating yaw from {current_pose[5]:.1f} to "
+            f"{target_yaw_deg:.1f} deg (delta {target_yaw_deg - current_pose[5]:.1f} deg)"
+        )
+        return self.move_to_pose(
+            target_position=current_pose[:3].tolist(),
+            target_orientation=target_orientation,
+            duration=duration,
+            stage_val=stage_val,
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

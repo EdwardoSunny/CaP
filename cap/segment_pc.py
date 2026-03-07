@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Default Molmo endpoint — override via MOLMO_BASE_URL env var
-MOLMO_BASE_URL = os.environ.get("MOLMO_BASE_URL", "http://scai4.cs.ucla.edu:8000/v1")
+MOLMO_BASE_URL = os.environ.get("MOLMO_BASE_URL", "http://scai3.cs.ucla.edu:8000/v1")
 MOLMO_MODEL = os.environ.get("MOLMO_MODEL", "allenai/Molmo2-8B")
 
 

@@ -20,6 +20,7 @@ from pathlib import Path
 import shapely
 
 from cap.lmp.lmp import LMP, LMPFGen
+from cap.grasp.alignment import compute_object_yaw
 
 # Modular components
 from cap.motion.base import MotionController
@@ -87,7 +88,7 @@ class LMPWrapper:
     def _setup_lmp_environment(self, known_objects=None):
         """Setup LMP-specific environment variables and object tracking."""
         self.known_objects = known_objects or [
-            "bread", "red ball", "white bottle", "red cup", "tissue box", "screwdriver",
+            "bread", "red ball", "white bottle", "red cup", "tissue box", "screwdriver", "shelf", "rubix cube",
         ]
         self._last_viz_data = None
 
@@ -177,6 +178,13 @@ class LMPWrapper:
         # Apply global detection offset
         grasp_pose[:3] += self.detection_offset_mm
 
+        # Override yaw with object-aligned yaw so the gripper fingers
+        # close across the object's narrow side.
+        if grasp_result.object_points is not None and len(grasp_result.object_points) >= 3:
+            yaw_deg = compute_object_yaw(grasp_result.object_points)
+            grasp_pose[5] = yaw_deg
+            logger.info(f"Object alignment: yaw set to {yaw_deg:.1f} deg")
+
         position_mm = grasp_pose[:3]
         orientation_deg = grasp_pose[3:]
 
@@ -254,8 +262,8 @@ class LMPWrapper:
             logger.info(f"goto_pos() full 6DOF: pos={target_position}, ori={target_orientation}")
         else:
             target_position = list(np.array(position_xyz_or_pose, dtype=np.float32))
-            target_orientation = current_pose[3:].tolist()
-            logger.info(f"goto_pos() position only: {target_position}, keeping ori={target_orientation}")
+            target_orientation = [180.0, 0.0, 0.0]
+            logger.info(f"goto_pos() position only: {target_position}, default ori={target_orientation}")
 
         result = self.motion.move_to_pose(
             target_position=target_position,
@@ -349,35 +357,40 @@ class LMPWrapper:
 
     def pick_place(
         self, pick_pos, place_pos,
-        pick_height=0.15, place_height=0.15, approach_height=0.25,
+        approach_offset=100.0, place_offset=50.0,
         stage_val=0,
     ):
-        """Execute pick and place operation."""
+        """Execute pick and place operation.
+
+        Args:
+            pick_pos: Pick target — [x,y,z], [x,y,z,r,p,y], or [x,y] (mm/deg).
+            place_pos: Place target — same formats as pick_pos.
+            approach_offset: How far above the target (mm) to approach from.
+            place_offset: How far above the place target (mm) to release.
+            stage_val: Stage value for action recording.
+        """
         try:
-            if len(pick_pos) == 2:
-                pick_pos_xyz = np.array([pick_pos[0], pick_pos[1], pick_height])
-            else:
-                pick_pos_xyz = np.array(pick_pos)
+            pick_pos_xyz = np.array(pick_pos[:3], dtype=np.float64)
+            place_pos_xyz = np.array(place_pos[:3], dtype=np.float64)
 
-            if len(place_pos) == 2:
-                place_pos_xyz = np.array([place_pos[0], place_pos[1], place_height])
-            else:
-                place_pos_xyz = np.array(place_pos)
-
-            approach_pick = np.array([pick_pos_xyz[0], pick_pos_xyz[1], approach_height])
-            approach_place = np.array([place_pos_xyz[0], place_pos_xyz[1], approach_height])
+            # Approach points: directly above pick/place targets
+            approach_pick = np.array([pick_pos_xyz[0], pick_pos_xyz[1], pick_pos_xyz[2] + approach_offset])
+            approach_place = np.array([place_pos_xyz[0], place_pos_xyz[1], place_pos_xyz[2] + approach_offset])
 
             logger.info(f"Pick and place: {pick_pos_xyz} -> {place_pos_xyz}")
+            logger.info(f"  Approach offset: {approach_offset} mm, Place offset: {place_offset} mm")
 
             self.goto_pos(approach_pick, duration=3.0, stage_val=stage_val)
             self.open_gripper(stage_val)
             time.sleep(0.5)
-            self.goto_pos(pick_pos_xyz, duration=2.0, stage_val=stage_val)
+            self.goto_pos(pick_pos, duration=2.0, stage_val=stage_val)
             self.close_gripper(stage_val)
             time.sleep(1.0)
             self.goto_pos(approach_pick, duration=2.0, stage_val=stage_val)
             self.goto_pos(approach_place, duration=3.0, stage_val=stage_val)
-            self.goto_pos(place_pos_xyz, duration=2.0, stage_val=stage_val)
+            # Place above the target to avoid pressing into the table
+            place_above = np.array([place_pos_xyz[0], place_pos_xyz[1], place_pos_xyz[2] + place_offset])
+            self.goto_pos(place_above, duration=2.0, stage_val=stage_val)
             self.open_gripper(stage_val)
             time.sleep(0.5)
             self.goto_pos(approach_place, duration=2.0, stage_val=stage_val)
@@ -473,8 +486,8 @@ class LMPWrapper:
 
     def put_first_on_second(self, obj1, obj2):
         try:
-            pick_pos = self.get_obj_pos(obj1)[:2] if isinstance(obj1, str) else np.array(obj1)[:2]
-            place_pos = self.get_obj_pos(obj2)[:2] if isinstance(obj2, str) else np.array(obj2)[:2]
+            pick_pos = self.get_obj_pos(obj1) if isinstance(obj1, str) else np.array(obj1)
+            place_pos = self.get_obj_pos(obj2) if isinstance(obj2, str) else np.array(obj2)
             logger.info(f"put_first_on_second: {obj1} -> {obj2}")
             return self.pick_place(pick_pos, place_pos)
         except Exception as e:

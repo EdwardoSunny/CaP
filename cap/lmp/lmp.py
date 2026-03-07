@@ -55,18 +55,31 @@ def _strip_echoed_query(text, use_query):
 
 
 def _trim_at_stop_tokens(text, stop_tokens):
-    """Trim text at the first occurrence of any stop token.
+    """Trim text at the first occurrence of any stop token at the start of a line.
     
     The Responses API does not support stop tokens natively,
-    so we handle them in post-processing.
+    so we handle them in post-processing.  Only matches at the
+    beginning of a line (or the very start of the text) to avoid
+    cutting inside string literals like f'objects = {get_obj_names()}'.
     """
     if not stop_tokens:
         return text
     earliest = len(text)
     for token in stop_tokens:
-        idx = text.find(token)
-        if idx != -1 and idx < earliest:
-            earliest = idx
+        # Check at position 0
+        if text.startswith(token):
+            earliest = min(earliest, 0)
+        # Check after every newline
+        search_start = 0
+        while True:
+            nl = text.find("\n", search_start)
+            if nl == -1:
+                break
+            line_start = nl + 1
+            if text[line_start:].startswith(token) and line_start < earliest:
+                earliest = line_start
+                break
+            search_start = line_start
     return text[:earliest]
 
 
