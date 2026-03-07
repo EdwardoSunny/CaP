@@ -87,7 +87,21 @@ class LMP:
     def __init__(self, name, cfg, lmp_fgen, fixed_vars, variable_vars):
         self._name = name
         self._cfg = cfg
-        self._client = OpenAI()  # Initialize OpenAI client
+
+        # Support both OpenAI API and locally-hosted models (e.g. vLLM).
+        # Config fields:
+        #   base_url:  set to vLLM server URL to use a hosted model
+        #   api_key:   set to "not-needed" for local models
+        #   api_mode:  "chat_completions" to use chat.completions.create
+        #              (required for vLLM); omit or set to "responses" for
+        #              the OpenAI Responses API (default).
+        client_kwargs = {}
+        if cfg.get("base_url"):
+            client_kwargs["base_url"] = cfg["base_url"]
+        if cfg.get("api_key"):
+            client_kwargs["api_key"] = cfg["api_key"]
+        self._client = OpenAI(**client_kwargs)
+        self._use_chat = cfg.get("api_mode") == "chat_completions"
 
         env = "real"
 
@@ -129,18 +143,31 @@ class LMP:
     def __call__(self, query, context="", **kwargs):
         prompt, use_query = self.build_prompt(query, context=context)
         print(f"[DEBUG LMP {self._name}] prompt length: {len(prompt)} chars, use_query: {use_query!r}")
+        system_msg = "You are a helpful assistant that pays attention to the user's instructions and writes good python code for operating a robot arm in a tabletop environment. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran. Do not repeat my code, just complete/continue from my code. Do not import any packages that aren't already there, you should never use the import keyword since all packages you need are already imported in the examples."
         while True:
             try:
-                response = self._client.responses.create(
-                    model=self._cfg.get("model", "gpt-5-nano"),
-                    instructions="You are a helpful assistant that pays attention to the user's instructions and writes good python code for operating a robot arm in a tabletop environment. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran. Do not repeat my code, just complete/continue from my code. Do not import any packages that aren't already there, you should never use the import keyword since all packages you need are already imported in the examples.",
-                    input=prompt,
-                    reasoning={"effort": "low"},
-                    max_output_tokens=self._cfg["max_tokens"],
-                )
+                if self._use_chat:
+                    response = self._client.chat.completions.create(
+                        model=self._cfg.get("model", "gpt-5-nano"),
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": prompt},
+                        ],
+                        max_tokens=self._cfg["max_tokens"],
+                        temperature=self._cfg.get("temperature", 0),
+                    )
+                    raw_text = response.choices[0].message.content or ""
+                else:
+                    response = self._client.responses.create(
+                        model=self._cfg.get("model", "gpt-5-nano"),
+                        instructions=system_msg,
+                        input=prompt,
+                        reasoning={"effort": "low"},
+                        max_output_tokens=self._cfg["max_tokens"],
+                    )
+                    raw_text = response.output_text or ""
 
-                raw_text = response.output_text or ""
-                print(f"[DEBUG LMP {self._name}] status={response.status}, output_text length={len(raw_text)}")
+                print(f"[DEBUG LMP {self._name}] output_text length={len(raw_text)}")
                 print(f"[DEBUG LMP {self._name}] raw response:\n---\n{raw_text}\n---")
 
                 # Strip markdown code fences if model wraps output
@@ -195,7 +222,14 @@ class LMPFGen:
 
     def __init__(self, cfg, fixed_vars, variable_vars):
         self._cfg = cfg
-        self._client = OpenAI()  # Initialize OpenAI client
+
+        client_kwargs = {}
+        if cfg.get("base_url"):
+            client_kwargs["base_url"] = cfg["base_url"]
+        if cfg.get("api_key"):
+            client_kwargs["api_key"] = cfg["api_key"]
+        self._client = OpenAI(**client_kwargs)
+        self._use_chat = cfg.get("api_mode") == "chat_completions"
 
         self._stop_tokens = list(self._cfg["stop"])
         self._fixed_vars = fixed_vars
@@ -211,16 +245,29 @@ class LMPFGen:
         use_query = f'{self._cfg["query_prefix"]}{f_sig}{self._cfg["query_suffix"]}'
         prompt = f"{self._base_prompt}\n{use_query}"
 
+        system_msg = "You are a helpful coding assistant. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran."
         while True:
             try:
-                response = self._client.responses.create(
-                    model=self._cfg.get("model", "gpt-5-nano"),
-                    instructions="You are a helpful coding assistant. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran.",
-                    input=prompt,
-                    reasoning={"effort": "low"},
-                    max_output_tokens=self._cfg["max_tokens"],
-                )
-                raw_text = response.output_text or ""
+                if self._use_chat:
+                    response = self._client.chat.completions.create(
+                        model=self._cfg.get("model", "gpt-5-nano"),
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": prompt},
+                        ],
+                        max_tokens=self._cfg["max_tokens"],
+                        temperature=self._cfg.get("temperature", 0),
+                    )
+                    raw_text = response.choices[0].message.content or ""
+                else:
+                    response = self._client.responses.create(
+                        model=self._cfg.get("model", "gpt-5-nano"),
+                        instructions=system_msg,
+                        input=prompt,
+                        reasoning={"effort": "low"},
+                        max_output_tokens=self._cfg["max_tokens"],
+                    )
+                    raw_text = response.output_text or ""
                 print(f"[DEBUG LMPFGen] raw response:\n---\n{raw_text}\n---")
 
                 stripped = raw_text.strip()
@@ -241,15 +288,28 @@ class LMPFGen:
                 sleep(10)
 
         if fix_bugs:
+            fix_msg = "Fix any bugs in the following code. Improve readability. Keep same inputs and outputs. Only make small changes. No comments. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran."
             try:
-                edit_response = self._client.responses.create(
-                    model=self._cfg.get("model", "gpt-5-nano"),
-                    instructions="Fix any bugs in the following code. Improve readability. Keep same inputs and outputs. Only make small changes. No comments. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran.",
-                    input=f_src,
-                    reasoning={"effort": "low"},
-                    max_output_tokens=self._cfg["max_tokens"],
-                )
-                f_src = edit_response.output_text.strip()
+                if self._use_chat:
+                    edit_response = self._client.chat.completions.create(
+                        model=self._cfg.get("model", "gpt-5-nano"),
+                        messages=[
+                            {"role": "system", "content": fix_msg},
+                            {"role": "user", "content": f_src},
+                        ],
+                        max_tokens=self._cfg["max_tokens"],
+                        temperature=self._cfg.get("temperature", 0),
+                    )
+                    f_src = edit_response.choices[0].message.content.strip()
+                else:
+                    edit_response = self._client.responses.create(
+                        model=self._cfg.get("model", "gpt-5-nano"),
+                        instructions=fix_msg,
+                        input=f_src,
+                        reasoning={"effort": "low"},
+                        max_output_tokens=self._cfg["max_tokens"],
+                    )
+                    f_src = edit_response.output_text.strip()
             except Exception as e:
                 print(f"Bug fixing failed: {e}. Using original code.")
 

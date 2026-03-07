@@ -9,7 +9,7 @@ import pathlib
 from cap.lmp.utils import load_config
 
 # Enable grasp visualization (point cloud, masks, grasp poses)
-os.environ["ENABLE_GRASP_VIZ"] = ""
+os.environ["ENABLE_GRASP_VIZ"] = "1"
 from cap.lmp.lmp_wrapper import setup_LMP
 from multiprocessing.managers import SharedMemoryManager
 from ril_env.precise_sleep import precise_wait

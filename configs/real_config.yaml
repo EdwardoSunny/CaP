@@ -6,10 +6,12 @@ lmp_config:
   lmps:
     tabletop_ui:
       prompt_fname: tabletop_ui_prompt
-      model: Qwen/Qwen3.5-27B-FP8
-      api_mode: chat_completions
-      base_url: http://scai4.cs.ucla.edu:8000/v1
-      api_key: not-needed
+      model: gpt-5-nano
+      # To use a local vLLM model instead, uncomment below:
+      # model: Qwen/Qwen3.5-27B-FP8
+      # api_mode: chat_completions
+      # base_url: http://scai3.cs.ucla.edu:8000/v1
+      # api_key: not-needed
       max_tokens: 16384
       temperature: 0
       query_prefix: "# Query: "
