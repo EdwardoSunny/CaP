@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.13' and sys_platform == 'darwin'",
@@ -4003,12 +4003,6 @@ wheels = [
 ]
 
 [[package]]
-name = "torch-scatter"
-version = "2.1.2"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/f5/ab/2a44ecac0f891dd0d765fc59ac8d277c6283a31907626560e72685df2ed6/torch_scatter-2.1.2.tar.gz", hash = "sha256:69b3aa435f2424ac6a1bfb6ff702da6eb73b33ca0db38fb26989c74159258e47", size = 108045, upload-time = "2023-10-06T08:49:07.081Z" }
-
-[[package]]
 name = "torchvision"
 version = "0.23.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4301,8 +4295,6 @@ dependencies = [
     { name = "spconv" },
     { name = "threadpoolctl" },
     { name = "timm" },
-    { name = "torch" },
-    { name = "torch-scatter" },
     { name = "transformers" },
     { name = "ultralytics" },
     { name = "webdataset" },
@@ -4340,8 +4332,6 @@ requires-dist = [
     { name = "spconv", specifier = ">=2.3.8" },
     { name = "threadpoolctl", specifier = ">=3.6.0" },
     { name = "timm", specifier = ">=1.0.19" },
-    { name = "torch", specifier = ">=2.8.0" },
-    { name = "torch-scatter", specifier = ">=2.1.2" },
     { name = "transformers", specifier = ">=4.48.3" },
     { name = "ultralytics", specifier = ">=8.3.179" },
     { name = "webdataset", specifier = ">=1.0.2" },
