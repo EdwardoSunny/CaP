@@ -5,15 +5,17 @@ import argparse
 import copy
 import json
 from pathlib import Path
+from time import sleep
 import sys
 
 import numpy as np
+from openai import APIConnectionError, APIError, RateLimitError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from cap.lmp.lmp import LMP, LMPFGen
+from cap.lmp.lmp import LMP, LMPFGen, _strip_echoed_query, _trim_at_stop_tokens
 from cap.lmp.utils import load_config
 
 
@@ -41,6 +43,60 @@ def build_tabletop_lmp(config_path: str, few_shot_override: str | None = None) -
         lmp._base_prompt = few_shot_override.strip()
 
     return lmp
+
+
+def generate_code(lmp: LMP, query: str, context: str = "") -> dict[str, str]:
+    prompt, use_query = lmp.build_prompt(query, context=context)
+    system_msg = (
+        "You are a helpful assistant that pays attention to the user's instructions "
+        "and writes good python code for operating a robot arm in a tabletop "
+        "environment. Only output python code with no explanation (code comments "
+        "are ok) or formatting, it should be ready to parse directly and ran. Do "
+        "not repeat my code, just complete/continue from my code. Do not import any "
+        "packages that aren't already there, you should never use the import keyword "
+        "since all packages you need are already imported in the examples."
+    )
+
+    while True:
+        try:
+            if lmp._use_chat:
+                response = lmp._client.chat.completions.create(
+                    model=lmp._cfg.get("model", "gpt-5-nano"),
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=lmp._cfg["max_tokens"],
+                    temperature=lmp._cfg.get("temperature", 0),
+                )
+                raw_text = response.choices[0].message.content or ""
+            else:
+                response = lmp._client.responses.create(
+                    model=lmp._cfg.get("model", "gpt-5-nano"),
+                    instructions=system_msg,
+                    input=prompt,
+                    reasoning={"effort": "low"},
+                    max_output_tokens=lmp._cfg["max_tokens"],
+                )
+                raw_text = response.output_text or ""
+
+            stripped = raw_text.strip()
+            if stripped.startswith("```python"):
+                stripped = stripped[len("```python") :].strip()
+            if stripped.startswith("```"):
+                stripped = stripped[len("```") :].strip()
+            if stripped.endswith("```"):
+                stripped = stripped[:-3].strip()
+
+            stripped = _strip_echoed_query(stripped, use_query)
+            code_str = _trim_at_stop_tokens(stripped, lmp._stop_tokens)
+            break
+        except (RateLimitError, APIConnectionError, APIError) as e:
+            print(f"OpenAI API got err {e}")
+            print("Retrying after 10s.")
+            sleep(10)
+
+    return {"prompt": prompt, "use_query": use_query, "code": code_str}
 
 
 def main():
@@ -80,7 +136,7 @@ def main():
         few_shot_override = Path(args.few_shot_file).read_text()
 
     lmp = build_tabletop_lmp(args.config, few_shot_override=few_shot_override)
-    result = lmp.generate_code(args.query, context=args.context)
+    result = generate_code(lmp, args.query, context=args.context)
 
     if args.json:
         print(
