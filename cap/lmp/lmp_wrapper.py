@@ -533,7 +533,7 @@ class LMPWrapper:
 # Factory function — wires everything together
 # ---------------------------------------------------------------------------
 
-def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen"):
+def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, vllm_host=None):
     """
     Setup the full LMP system.
 
@@ -544,10 +544,27 @@ def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen"):
         grasp_strategy: Which grasp strategy to use.
                         "graspgen" — NVIDIA GraspGen (default)
                         Or pass a GraspStrategy instance directly.
+        model: Override LLM model for all LMPs. If it contains a "/" (e.g.
+               "Qwen/Qwen3.5-27B-FP8"), vllm_host is used as the base URL
+               and chat_completions mode is enabled automatically.
+        vllm_host: vLLM server address, e.g. "edward@scai4.cs.ucla.edu:8000".
+                   Used when model contains "/".
 
     Returns:
         (lmp_tabletop_ui, LMP_env)
     """
+    # --- Override model in all LMP configs if provided ---
+    if model is not None:
+        is_local = "/" in model
+        if is_local and not vllm_host:
+            raise ValueError(f"Model '{model}' looks like a local model (contains '/') but no vllm_host was provided.")
+        for lmp_name in config["lmp_config"]["lmps"]:
+            lmp_cfg = config["lmp_config"]["lmps"][lmp_name]
+            lmp_cfg["model"] = model
+            if is_local:
+                lmp_cfg["base_url"] = f"http://{vllm_host}/v1"
+                lmp_cfg["api_key"] = "not-needed"
+                lmp_cfg["api_mode"] = "chat_completions"
     project_root = Path(__file__).parent.parent.parent
 
     # --- 1. Motion controller ---

@@ -19,9 +19,22 @@ from cap.lmp.lmp import LMP, LMPFGen, _strip_echoed_query, _trim_at_stop_tokens
 from cap.lmp.utils import load_config
 
 
-def build_tabletop_lmp(config_path: str, few_shot_override: str | None = None) -> LMP:
+def build_tabletop_lmp(config_path: str, few_shot_override: str | None = None,
+                       model: str | None = None, vllm_host: str | None = None) -> LMP:
     config = load_config(config_path)
     lmps_cfg = config["lmp_config"]["lmps"]
+
+    # Override model/host in all LMP configs
+    if model is not None:
+        is_local = "/" in model
+        if is_local and not vllm_host:
+            raise ValueError(f"Model '{model}' looks like a local model (contains '/') but no vllm_host was provided.")
+        for lmp_cfg in lmps_cfg.values():
+            lmp_cfg["model"] = model
+            if is_local:
+                lmp_cfg["base_url"] = f"http://{vllm_host}/v1"
+                lmp_cfg["api_key"] = "not-needed"
+                lmp_cfg["api_mode"] = "chat_completions"
 
     fixed_vars = {"np": np}
     variable_vars = {}
@@ -129,13 +142,24 @@ def main():
         action="store_true",
         help="Print machine-readable JSON output.",
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="LLM model name. Use 'Owner/Model' (with '/') for local vLLM.",
+    )
+    parser.add_argument(
+        "--vllm-host",
+        default=None,
+        help="vLLM server host:port, e.g. scai4.cs.ucla.edu:8000",
+    )
     args = parser.parse_args()
 
     few_shot_override = None
     if args.few_shot_file:
         few_shot_override = Path(args.few_shot_file).read_text()
 
-    lmp = build_tabletop_lmp(args.config, few_shot_override=few_shot_override)
+    lmp = build_tabletop_lmp(args.config, few_shot_override=few_shot_override,
+                             model=args.model, vllm_host=args.vllm_host)
     result = generate_code(lmp, args.query, context=args.context)
 
     if args.json:
