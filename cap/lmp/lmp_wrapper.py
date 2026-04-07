@@ -533,7 +533,7 @@ class LMPWrapper:
 # Factory function — wires everything together
 # ---------------------------------------------------------------------------
 
-def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, vllm_host=None):
+def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, vllm_host=None, max_tokens=None, context_window=None):
     """
     Setup the full LMP system.
 
@@ -565,6 +565,10 @@ def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, v
                 lmp_cfg["base_url"] = f"http://{vllm_host}/v1"
                 lmp_cfg["api_key"] = "not-needed"
                 lmp_cfg["api_mode"] = "chat_completions"
+            if max_tokens is not None:
+                lmp_cfg["max_tokens"] = max_tokens
+            if context_window is not None:
+                lmp_cfg["context_window"] = context_window
     project_root = Path(__file__).parent.parent.parent
 
     # --- 1. Motion controller ---

@@ -29,6 +29,8 @@ def main(
     record_res=(1280, 720),
     model=None,       # e.g. "Qwen/Qwen3.5-27B-FP8" for local vLLM
     vllm_host=None,   # e.g. "scai4.cs.ucla.edu:8000"
+    max_tokens=None,  # Override max output tokens for smaller models
+    context_window=None,  # Model context window size (enables few-shot truncation)
 ):
     dt = 1.0 / frequency
     output_dir = pathlib.Path(output)
@@ -61,7 +63,7 @@ def main(
             time.sleep(1)
 
             config = load_config("configs/real_config.yaml")
-            lmp_tabletop_ui, lmp_env = setup_LMP(config, env, xarm_config, grasp_strategy="hardcode", model=model, vllm_host=vllm_host)
+            lmp_tabletop_ui, lmp_env = setup_LMP(config, env, xarm_config, grasp_strategy="hardcode", model=model, vllm_host=vllm_host, max_tokens=max_tokens, context_window=context_window)
 
             logger.info("=" * 60)
             logger.info("Init Success")
@@ -80,5 +82,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=None, help="LLM model name. Use 'Owner/Model' for local vLLM.")
     parser.add_argument("--vllm-host", default=None, help="vLLM server host:port, e.g. scai4.cs.ucla.edu:8000")
+    parser.add_argument("--max-tokens", type=int, default=None, help="Override max output tokens")
+    parser.add_argument("--context-window", type=int, default=None, help="Model context window size (enables auto few-shot truncation)")
     args = parser.parse_args()
-    main(model=args.model, vllm_host=args.vllm_host)
+    main(model=args.model, vllm_host=args.vllm_host, max_tokens=args.max_tokens, context_window=args.context_window)

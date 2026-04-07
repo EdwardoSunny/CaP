@@ -84,6 +84,9 @@ def _trim_at_stop_tokens(text, stop_tokens):
 
 
 class LMP:
+    # Rough chars-per-token ratio for truncation estimation.
+    _CHARS_PER_TOKEN = 4
+
     def __init__(self, name, cfg, lmp_fgen, fixed_vars, variable_vars):
         self._name = name
         self._cfg = cfg
@@ -118,6 +121,52 @@ class LMP:
     def clear_exec_hist(self):
         self.exec_hist = ""
 
+    @staticmethod
+    def _truncate_few_shot(base_prompt, max_prompt_chars):
+        """Drop few-shot examples from the end until the prompt fits within max_prompt_chars.
+
+        Few-shot examples are delimited by lines starting with 'objects = ['.
+        Everything before the first such line (instructions, imports) is kept intact.
+        """
+        lines = base_prompt.split("\n")
+
+        # Find where the few-shot section starts (first 'objects = [' line)
+        first_example_idx = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("objects = ["):
+                first_example_idx = i
+                break
+
+        if first_example_idx is None:
+            # No few-shot examples found, return as-is
+            return base_prompt
+
+        header = "\n".join(lines[:first_example_idx])
+        examples_text = lines[first_example_idx:]
+
+        # Split into individual examples (each starts with 'objects = [')
+        examples = []
+        current = []
+        for line in examples_text:
+            if line.strip().startswith("objects = [") and current:
+                examples.append("\n".join(current))
+                current = [line]
+            else:
+                current.append(line)
+        if current:
+            examples.append("\n".join(current))
+
+        # Drop examples from the end until it fits
+        while examples and len(header + "\n" + "\n".join(examples)) > max_prompt_chars:
+            dropped = examples.pop()
+            print(f"[LMP truncation] Dropped example ({len(dropped)} chars) to fit context window")
+
+        if not examples:
+            print("[LMP truncation] WARNING: All few-shot examples were dropped to fit context window")
+            return header
+
+        return header + "\n" + "\n".join(examples)
+
     def build_prompt(self, query, context=""):
         if len(self._variable_vars) > 0:
             variable_vars_imports_str = (
@@ -125,9 +174,30 @@ class LMP:
             )
         else:
             variable_vars_imports_str = ""
-        prompt = self._base_prompt.replace(
+
+        base_prompt = self._base_prompt.replace(
             "{variable_vars_imports}", variable_vars_imports_str
         )
+
+        # Auto-truncate few-shot examples if context_window is set
+        context_window = self._cfg.get("context_window")
+        if context_window is not None:
+            max_tokens = self._cfg["max_tokens"]
+            # Budget for prompt = context_window - max_tokens (in chars)
+            max_prompt_chars = (context_window - max_tokens) * self._CHARS_PER_TOKEN
+            # Account for the suffix (context + query) that will be appended
+            suffix = ""
+            if self._cfg["maintain_session"]:
+                suffix += f"\n{self.exec_hist}"
+            if context != "":
+                suffix += f"\n{context}"
+            use_query = f'{self._cfg["query_prefix"]}{query}{self._cfg["query_suffix"]}'
+            suffix += f"\n{use_query}"
+            max_base_chars = max_prompt_chars - len(suffix)
+            if len(base_prompt) > max_base_chars:
+                base_prompt = self._truncate_few_shot(base_prompt, max_base_chars)
+
+        prompt = base_prompt
 
         if self._cfg["maintain_session"]:
             prompt += f"\n{self.exec_hist}"

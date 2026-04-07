@@ -20,7 +20,8 @@ from cap.lmp.utils import load_config
 
 
 def build_tabletop_lmp(config_path: str, few_shot_override: str | None = None,
-                       model: str | None = None, vllm_host: str | None = None) -> LMP:
+                       model: str | None = None, vllm_host: str | None = None,
+                       max_tokens: int | None = None, context_window: int | None = None) -> LMP:
     config = load_config(config_path)
     lmps_cfg = config["lmp_config"]["lmps"]
 
@@ -35,6 +36,10 @@ def build_tabletop_lmp(config_path: str, few_shot_override: str | None = None,
                 lmp_cfg["base_url"] = f"http://{vllm_host}/v1"
                 lmp_cfg["api_key"] = "not-needed"
                 lmp_cfg["api_mode"] = "chat_completions"
+            if max_tokens is not None:
+                lmp_cfg["max_tokens"] = max_tokens
+            if context_window is not None:
+                lmp_cfg["context_window"] = context_window
 
     fixed_vars = {"np": np}
     variable_vars = {}
@@ -152,6 +157,18 @@ def main():
         default=None,
         help="vLLM server host:port, e.g. scai4.cs.ucla.edu:8000",
     )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="Override max output tokens (useful for smaller models).",
+    )
+    parser.add_argument(
+        "--context-window",
+        type=int,
+        default=None,
+        help="Model context window size in tokens (enables auto few-shot truncation).",
+    )
     args = parser.parse_args()
 
     few_shot_override = None
@@ -159,7 +176,8 @@ def main():
         few_shot_override = Path(args.few_shot_file).read_text()
 
     lmp = build_tabletop_lmp(args.config, few_shot_override=few_shot_override,
-                             model=args.model, vllm_host=args.vllm_host)
+                             model=args.model, vllm_host=args.vllm_host,
+                             max_tokens=args.max_tokens, context_window=args.context_window)
     result = generate_code(lmp, args.query, context=args.context)
 
     if args.json:
