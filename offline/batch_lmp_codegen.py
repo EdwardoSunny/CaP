@@ -77,40 +77,41 @@ from lmp_codegen_test import build_tabletop_lmp, generate_code  # noqa: E402
 # CaP API allowlist — used for uses_only_cap_api check
 # ---------------------------------------------------------------------------
 
-# Hardcoded default allowlist (names callable inside generated CaP code).
-# This matches the API listed in the plan's verifier prompt template.
+# Authoritative allowlist: every name callable inside generated CaP code.
+# Derived directly from cap/lmp/lmp_wrapper.py::setup_LMP's variable_vars and
+# fixed_vars — this is the single source of truth for what the LMP runtime
+# will accept. Names NOT in this set (e.g. "say", "stack_objects_in_order",
+# "wait" if not listed here, etc.) are treated as hallucinations.
 _DEFAULT_CAP_API = {
+    # --- Motion (LMPWrapper) ---
+    "goto_pos", "goto_xy", "move_relative", "move_up", "move_down",
+    "pick_place", "follow_traj", "wait",
+    # --- Gripper ---
+    "open_gripper", "close_gripper", "set_gripper",
+    "is_gripper_open", "is_gripper_closed",
+    # --- Robot state ---
+    "get_robot_pos", "get_robot_xy",
+    # --- Object queries / actions ---
+    "get_obj_pos", "get_obj_names", "is_obj_visible",
     "put_first_on_second",
-    "stack_objects_in_order",
-    "goto_pos",
-    "get_obj_pos",
-    "get_obj_names",
-    "parse_obj_name",
-    "parse_position",
-    "move_up",
-    "move_down",
-    "open_gripper",
-    "close_gripper",
-    "pick_place",
-    "is_obj_visible",
-    "say",
-    # Common helpers / builtins safe in CaP context
-    "print",
-    "len",
-    "range",
-    "enumerate",
-    "zip",
-    "list",
-    "dict",
-    "str",
-    "int",
-    "float",
-    "bool",
-    "None",
-    "True",
-    "False",
-    # numpy (available as np)
-    "np",
+    "get_bbox", "get_color",
+    "get_object_center", "clear_detection_cache",
+    "denormalize_xy", "get_corner_name", "get_side_name",
+    # --- Sub-LMPs (instances of class LMP, used as callables) ---
+    "parse_obj_name", "parse_position", "parse_question", "transform_shape_pts",
+    # --- fixed_vars: libraries always available inside generated code ---
+    "np", "time",
+    # shapely.geometry / shapely.affinity are imported by name into fixed_vars
+    # (Point, Polygon, LineString, translate, scale, rotate, etc.) — too many
+    # to enumerate; if the generated code uses them the allowlist check will
+    # flag them. For DARPA-facing reporting that is acceptable noise.
+    # --- Builtins and literals ---
+    "print", "len", "range", "enumerate", "zip",
+    "list", "dict", "tuple", "set",
+    "str", "int", "float", "bool",
+    "None", "True", "False",
+    "min", "max", "sum", "abs", "round",
+    "any", "all", "sorted", "reversed",
 }
 
 

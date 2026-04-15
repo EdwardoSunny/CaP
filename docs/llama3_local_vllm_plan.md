@@ -450,8 +450,45 @@ Three successive fixes are applied, each producing a versioned prompt file and o
 | **v1** | RC-1: add per-prompt `context` field from `objects` | `tabletop_ui_prompt.txt` | `prompts_v1_context.jsonl` | `outputs_llama3_v1_context_fix.jsonl` | 39/45 pass; for-loop=5; still 41 `goto_pos`-leading |
 | **v2** ✅ **BEST** | RC-1+RC-2: remove trailing `goto_pos` examples from prompt | `tabletop_ui_prompt_v1_no_goto.txt` | `prompts_v1_context.jsonl` | `outputs_llama3_v2_prompt_fix.jsonl` | **44/45 pass**; `put_first_on_second`=33; starts_goto=11; avg 1.5 lines |
 | **v3** | RC-1+RC-2+RC-3: add BEHAVIOR-aligned few-shot examples at start of prompt | `tabletop_ui_prompt_v2_behavior.txt` | `prompts_v1_context.jsonl` | `outputs_llama3_v3_behavior_fewshot.jsonl` | 45/45 pass but all `goto_pos` (BEHAVIOR examples confuse 8B model) |
+| **v4** ✅ **BEST** | RC-6: remove non-API calls from few-shot prompt (`say`, `stack_objects_in_order`) and tighten system message | `tabletop_ui_prompt_v3_strict.txt` | `prompts_v1_context.jsonl` | `outputs_llama3_v4_strict_api.jsonl` | **45/45 pass**, **0 `say`**, **0 `stack_objects_in_order`**, **45/45 use `put_first_on_second`**, 0 `goto_pos` fallbacks, avg 1.5 lines |
 
-**v3 diagnosis (why adding BEHAVIOR examples hurts):** Inserting 7 new BEHAVIOR-domain examples (pick-place for-loops on household objects) — regardless of their position in the prompt — causes the Llama 3 8B model to generate `goto_pos(...)` for all 45 queries. Root cause: the 8B model cannot reliably context-switch between two very different object domains (colorful blocks/bowls vs. household items). The BEHAVIOR examples introduce ambiguity about which pattern to follow, and the model falls back to the simplest action it knows from the API header comments (`goto_pos`). The plain block/bowl examples (v2) already elicit correct `put_first_on_second` calls when the context objects are correctly grounded. **Recommendation: stay with v2 for DARPA reporting.**
+**v3 diagnosis (why adding BEHAVIOR examples hurts):** Inserting 7 new BEHAVIOR-domain examples (pick-place for-loops on household objects) — regardless of their position in the prompt — causes the Llama 3 8B model to generate `goto_pos(...)` for all 45 queries. Root cause: the 8B model cannot reliably context-switch between two very different object domains (colorful blocks/bowls vs. household items). The BEHAVIOR examples introduce ambiguity about which pattern to follow, and the model falls back to the simplest action it knows from the API header comments (`goto_pos`). The plain block/bowl examples (v2) already elicit correct `put_first_on_second` calls when the context objects are correctly grounded.
+
+### RC-6 — Prompt contained non-API calls (discovered after v3)
+
+The original `tabletop_ui_prompt.txt` imports and uses two functions that are NOT in the actual CaP runtime (`cap/lmp/lmp_wrapper.py::setup_LMP::variable_vars`):
+
+| Name | Actual status | How it leaked in |
+|---|---|---|
+| `say(...)` | Exists as `lambda msg: print(f"robot says: {msg}")` — a print wrapper, not a real robot action | Appeared in 40+ few-shot examples as narration; model copied the pattern into generated code |
+| `stack_objects_in_order(object_names=...)` | **Does not exist** — no implementation anywhere in `cap/` | Imported at line 19 of the prompt; used in 4 few-shot examples; any generated code that called it would fail at runtime |
+
+**Fix (v4):** A scripted transformation of `tabletop_ui_prompt_v1_no_goto.txt` → `tabletop_ui_prompt_v3_strict.txt`:
+1. Stripped `say` and `stack_objects_in_order` from the import line.
+2. Deleted every `say(...)` line in the few-shot examples.
+3. Rewrote every `stack_objects_in_order(object_names=L)` call as an explicit loop:
+   ```python
+   for i in range(1, len(L)):
+     put_first_on_second(L[i], L[i-1])
+   ```
+4. Dropped few-shot examples whose only body had been a `say(...)` call (e.g. "cut the bowls in half" with answer "no, I can only move objects around").
+
+Additionally:
+- `offline/batch_lmp_codegen.py`'s `_DEFAULT_CAP_API` allowlist was rebuilt from the authoritative source (`lmp_wrapper.py::setup_LMP::variable_vars` and `fixed_vars`), removing `say`/`stack_objects_in_order` and adding real callables like `goto_xy`, `follow_traj`, `get_bbox`, etc.
+- `offline/lmp_codegen_test.py`'s system message now explicitly enumerates the callable API and forbids `say()`, `stack_objects_in_order()`, and any other non-API calls.
+
+**Recommendation:** Use **v4** (`outputs_llama3_v4_strict_api.jsonl`) for DARPA reporting — every generated line is an executable robot action with no narration stubs and no unimplemented calls.
+
+```bash
+# v4: strict-API prompt (no say, no stack_objects_in_order)
+python offline/batch_lmp_codegen.py \
+  --prompts demo/prompts_v1_context.jsonl \
+  --few-shot-file cap/lmp/prompts/real/tabletop_ui_prompt_v3_strict.txt \
+  --model dganochenko/llama-3-8b-chat \
+  --vllm-host localhost:8000 \
+  --max-tokens 512 --context-window 8192 \
+  --output demo/outputs_llama3_v4_strict_api.jsonl
+```
 
 ### Fix Scripts
 

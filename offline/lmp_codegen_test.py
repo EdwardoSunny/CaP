@@ -140,6 +140,8 @@ def generate_code(lmp: LMP, query: str, context: str = "") -> dict[str, str]:
 
     # System message instructs the model to output only runnable Python (no markdown fences,
     # no imports, no explanation) — keeps post-processing simple and reliable.
+    # Also forbids `say(...)` and `stack_objects_in_order(...)` which are NOT part of the
+    # real CaP runtime API (cap/lmp/lmp_wrapper.py).
     system_msg = (
         "You are a helpful assistant that pays attention to the user's instructions "
         "and writes good python code for operating a robot arm in a tabletop "
@@ -147,7 +149,13 @@ def generate_code(lmp: LMP, query: str, context: str = "") -> dict[str, str]:
         "are ok) or formatting, it should be ready to parse directly and ran. Do "
         "not repeat my code, just complete/continue from my code. Do not import any "
         "packages that aren't already there, you should never use the import keyword "
-        "since all packages you need are already imported in the examples."
+        "since all packages you need are already imported in the examples. "
+        "IMPORTANT: only call functions that the robot runtime actually supports — "
+        "i.e. put_first_on_second, pick_place, goto_pos, move_up, move_down, "
+        "open_gripper, close_gripper, get_obj_pos, get_obj_names, parse_obj_name, "
+        "parse_position, parse_question, is_obj_visible, and basic Python. "
+        "Do NOT call say(), stack_objects_in_order(), or any function not listed above. "
+        "Every line of code must be an executable robot action."
     )
 
     # Retry loop: transparently handles transient API errors (rate limits, timeouts).
