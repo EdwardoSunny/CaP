@@ -141,7 +141,9 @@ def generate_code(lmp: LMP, query: str, context: str = "") -> dict[str, str]:
     # System message instructs the model to output only runnable Python (no markdown fences,
     # no imports, no explanation) — keeps post-processing simple and reliable.
     # Also forbids `say(...)` and `stack_objects_in_order(...)` which are NOT part of the
-    # real CaP runtime API (cap/lmp/lmp_wrapper.py).
+    # real CaP runtime API (cap/lmp/lmp_wrapper.py), and encourages using the full API
+    # surface (parse_obj_name, parse_position, parse_question, transform_shape_pts)
+    # instead of converging on a single primitive.
     system_msg = (
         "You are a helpful assistant that pays attention to the user's instructions "
         "and writes good python code for operating a robot arm in a tabletop "
@@ -152,10 +154,15 @@ def generate_code(lmp: LMP, query: str, context: str = "") -> dict[str, str]:
         "since all packages you need are already imported in the examples. "
         "IMPORTANT: only call functions that the robot runtime actually supports — "
         "i.e. put_first_on_second, pick_place, goto_pos, move_up, move_down, "
-        "open_gripper, close_gripper, get_obj_pos, get_obj_names, parse_obj_name, "
-        "parse_position, parse_question, is_obj_visible, and basic Python. "
+        "open_gripper, close_gripper, get_obj_pos, get_obj_names, is_obj_visible, "
+        "and the helper LMPs parse_obj_name, parse_position, parse_question, "
+        "transform_shape_pts, plus basic Python. "
         "Do NOT call say(), stack_objects_in_order(), or any function not listed above. "
-        "Every line of code must be an executable robot action."
+        "Use parse_obj_name(description, f'objects = {get_obj_names()}') to resolve "
+        "groups of similar objects (e.g. 'the books', 'the plates', 'the pops') and "
+        "iterate with a for-loop when the task involves multiple objects. Use "
+        "parse_position(description) for spatial references like 'next to the sink' "
+        "or 'the designated area'. Every line of code must be an executable robot action."
     )
 
     # Retry loop: transparently handles transient API errors (rate limits, timeouts).

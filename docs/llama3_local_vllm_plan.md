@@ -450,7 +450,19 @@ Three successive fixes are applied, each producing a versioned prompt file and o
 | **v1** | RC-1: add per-prompt `context` field from `objects` | `tabletop_ui_prompt.txt` | `prompts_v1_context.jsonl` | `outputs_llama3_v1_context_fix.jsonl` | 39/45 pass; for-loop=5; still 41 `goto_pos`-leading |
 | **v2** ✅ **BEST** | RC-1+RC-2: remove trailing `goto_pos` examples from prompt | `tabletop_ui_prompt_v1_no_goto.txt` | `prompts_v1_context.jsonl` | `outputs_llama3_v2_prompt_fix.jsonl` | **44/45 pass**; `put_first_on_second`=33; starts_goto=11; avg 1.5 lines |
 | **v3** | RC-1+RC-2+RC-3: add BEHAVIOR-aligned few-shot examples at start of prompt | `tabletop_ui_prompt_v2_behavior.txt` | `prompts_v1_context.jsonl` | `outputs_llama3_v3_behavior_fewshot.jsonl` | 45/45 pass but all `goto_pos` (BEHAVIOR examples confuse 8B model) |
-| **v4** ✅ **BEST** | RC-6: remove non-API calls from few-shot prompt (`say`, `stack_objects_in_order`) and tighten system message | `tabletop_ui_prompt_v3_strict.txt` | `prompts_v1_context.jsonl` | `outputs_llama3_v4_strict_api.jsonl` | **45/45 pass**, **0 `say`**, **0 `stack_objects_in_order`**, **45/45 use `put_first_on_second`**, 0 `goto_pos` fallbacks, avg 1.5 lines |
+| **v4** | RC-6: remove non-API calls from few-shot prompt (`say`, `stack_objects_in_order`) and tighten system message | `tabletop_ui_prompt_v3_strict.txt` | `prompts_v1_context.jsonl` | `outputs_llama3_v4_strict_api.jsonl` | 45/45 pass but **converges on single `put_first_on_second`** (0 for-loops, 0 `parse_obj_name`) — too uniform, ignores other LMP helpers |
+| **v5** ✅ **BEST** | RC-7: restore diversity — append strict-API BEHAVIOR examples that anchor `parse_obj_name + for-loop` and `parse_position` as the most-recent patterns | `tabletop_ui_prompt_v4_diverse.txt` | `prompts_v1_context.jsonl` | `outputs_llama3_v5_diverse.jsonl` | **44/45 pass**, **8 `parse_position`** (4× v4), **1 full `parse_obj_name + for-loop`**, 45 `put_first_on_second`, 0 `goto_pos` / `say` / `stack_objects_in_order` |
+
+### Cross-version diversity table (45 prompts)
+
+| ver | pass | for-loop | `parse_obj_name` | `parse_position` | `put_first_on_second` | `goto_pos` start | `say()` | `stack()` | avg lines |
+|-----|------|----------|------------------|------------------|-----------------------|------------------|---------|-----------|-----------|
+| v0  | 43/45 | 0 | 0 | 22 | 0 | 41 | 0 | 0 | 1.0 |
+| v1  | 39/45 | 5 | 3 | 21 | 0 | 41 | 2 | 0 | 2.0 |
+| v2  | 44/45 | 2 | 1 | 3  | 33 | 11 | 4 | 0 | 1.5 |
+| v3  | 45/45 | 3 | 0 | 4  | 3  | 45 | 0 | 0 | 1.2 |
+| v4  | 45/45 | 0 | 0 | 2  | 45 | 0  | 0 | 0 | 1.5 |
+| **v5**  | **44/45** | **1** | **1** | **8**  | **45** | **0**  | **0** | **0** | **1.4** |
 
 **v3 diagnosis (why adding BEHAVIOR examples hurts):** Inserting 7 new BEHAVIOR-domain examples (pick-place for-loops on household objects) — regardless of their position in the prompt — causes the Llama 3 8B model to generate `goto_pos(...)` for all 45 queries. Root cause: the 8B model cannot reliably context-switch between two very different object domains (colorful blocks/bowls vs. household items). The BEHAVIOR examples introduce ambiguity about which pattern to follow, and the model falls back to the simplest action it knows from the API header comments (`goto_pos`). The plain block/bowl examples (v2) already elicit correct `put_first_on_second` calls when the context objects are correctly grounded.
 
@@ -477,8 +489,6 @@ Additionally:
 - `offline/batch_lmp_codegen.py`'s `_DEFAULT_CAP_API` allowlist was rebuilt from the authoritative source (`lmp_wrapper.py::setup_LMP::variable_vars` and `fixed_vars`), removing `say`/`stack_objects_in_order` and adding real callables like `goto_xy`, `follow_traj`, `get_bbox`, etc.
 - `offline/lmp_codegen_test.py`'s system message now explicitly enumerates the callable API and forbids `say()`, `stack_objects_in_order()`, and any other non-API calls.
 
-**Recommendation:** Use **v4** (`outputs_llama3_v4_strict_api.jsonl`) for DARPA reporting — every generated line is an executable robot action with no narration stubs and no unimplemented calls.
-
 ```bash
 # v4: strict-API prompt (no say, no stack_objects_in_order)
 python offline/batch_lmp_codegen.py \
@@ -489,6 +499,59 @@ python offline/batch_lmp_codegen.py \
   --max-tokens 512 --context-window 8192 \
   --output demo/outputs_llama3_v4_strict_api.jsonl
 ```
+
+### RC-7 — v4 ignores the rest of the CaP LMP surface
+
+v4 hit 45/45 PASS but every single output was a flat sequence of `put_first_on_second(source, dest_string)` calls. The other callable LMPs advertised by `cap/lmp/prompts/real/` — `parse_obj_name`, `parse_position`, `parse_question`, `transform_shape_pts` — were never invoked. Root cause: `tabletop_ui_prompt_v3_strict.txt` ends with the "put the red block on the farthest bowl" example (a single-call pattern). Llama 3 8B anchors on the last few-shot example and mirrored it for all 45 BEHAVIOR queries.
+
+**Why v3 and v4 together inform v5:**
+- **v1** (context fix, original prompt) proved the model *will* emit `parse_obj_name` + for-loop when those patterns appear in the few-shot corpus (5 for-loops, 3 `parse_obj_name`).
+- **v2** proved the strict `put_first_on_second` + destination form works when the block/bowl examples are clean (33 `put_first_on_second`).
+- **v3** proved that appending BEHAVIOR-domain examples *with `say(...)` narration* regresses to `goto_pos` — because the BEHAVIOR examples contradicted the (implicit) strict API that the rest of the prompt followed.
+- **v4** proved that stripping `say` / `stack_objects_in_order` yields correct API usage but collapses the pattern space to a single primitive.
+
+**Fix (v5):** Append to v3_strict six carefully-written BEHAVIOR-domain examples that all follow the strict API (no `say`, no `stack_objects_in_order`) and demonstrate the richer patterns:
+1. `parse_obj_name('the books', f'objects = {get_obj_names()}')` + for-loop + `put_first_on_second`
+2. `parse_obj_name` with literal destination string (carton, dishwasher, bucket, coffee table)
+3. `parse_position('a point next to the sink')` + `parse_obj_name` + for-loop
+4. `parse_position('the designated area')` + `parse_obj_name` + for-loop
+
+The last three examples (most recent in the prompt) all use the `parse_obj_name + for-loop` pattern, so the 8B model anchors on that pattern rather than on the single-call `put_first_on_second`. System message also now explicitly instructs the model to use `parse_obj_name` for groups of similar objects ("the books", "the plates") and `parse_position` for spatial references.
+
+```bash
+# v5: strict-API + diverse patterns (parse_obj_name + for-loops + parse_position)
+python offline/batch_lmp_codegen.py \
+  --prompts demo/prompts_v1_context.jsonl \
+  --few-shot-file cap/lmp/prompts/real/tabletop_ui_prompt_v4_diverse.txt \
+  --model dganochenko/llama-3-8b-chat \
+  --vllm-host localhost:8000 \
+  --max-tokens 512 --context-window 8192 \
+  --output demo/outputs_llama3_v5_diverse.jsonl
+```
+
+### Context experiment noted for completeness
+
+`offline/add_context_to_prompts.py` now accepts `--keep-duplicates`, which writes
+`demo/prompts_v2_context_duplicates.jsonl`. Running v5 against the duplicate-preserved
+context (e.g. `objects = ['notebook','notebook','notebook','notebook','notebook','hardback','carton']`)
+**does not** elicit more `parse_obj_name + for-loop` usage from Llama 3 8B — instead the
+model enumerates each duplicate by hand, producing consecutive identical
+`put_first_on_second(...)` lines that trigger the `no_repetition` quality check and drop the
+pass rate to 38/45. The de-duplicated context (`prompts_v1_context.jsonl`) remains the
+recommended input. The duplicate-context artifacts are kept on disk as evidence, not for
+reporting.
+
+### Final recommendation
+
+Use **v5** (`outputs_llama3_v5_diverse.jsonl`) for DARPA reporting. It combines:
+- the strict-API guarantee from v4 (0 `say`, 0 `stack_objects_in_order`, 0 `goto_pos` fallbacks);
+- the varied CaP primitives seen earlier (`parse_position` for spatial destinations, `parse_obj_name + for-loop` where applicable);
+- the correct core action (`put_first_on_second`) for every pick-place query.
+
+Artifacts to hand off:
+- `demo/outputs_llama3_v5_diverse.jsonl` — the 45 generated programs
+- `demo/prompts_v1_context.jsonl` — the matching prompt inputs
+- `cap/lmp/prompts/real/tabletop_ui_prompt_v4_diverse.txt` — the frozen few-shot prompt that produced v5
 
 ### Fix Scripts
 
@@ -530,43 +593,59 @@ python offline/batch_lmp_codegen.py \
 
 ## Step 3 — Evaluate Output Quality and Produce the Report
 
+> **Status (2026-04-15):** Both `offline/evaluate_outputs.py` and
+> `offline/build_quality_report.py` are implemented. The canonical run uses the
+> final v5 artifact `demo/outputs_llama3_v5_diverse.jsonl` (44/45 pass, diverse
+> API usage, no hallucinated calls — see "Final recommendation" above).
+
 ### 3a — Per-output quality check
 
-For each record in `demo/outputs_llama3.jsonl`, fill in the `quality` block using these criteria:
+For each record in `demo/outputs_llama3_<version>.jsonl`, re-score against these criteria
+(`batch_lmp_codegen.py` already writes a `quality` block; this step recomputes every
+check deterministically and adds the `no_echo` check from the design spec):
 
 | Criterion | `quality` key | What to check |
 |---|---|---|
 | Syntactically valid Python | `syntactically_valid` | No mid-statement truncation; `compile()` does not raise |
-| Uses CaP API calls only | `uses_only_cap_api` | `pick_and_place()`, `push()`, `goto_pos()`, etc. — no invented functions |
-| Does not echo the query | `no_echo` | First line is not `# Query: ...` |
-| No repetition loops | `no_repetition` | No consecutive identical calls |
+| Uses CaP API calls only | `uses_only_cap_api` | Only names in the built-in allowlist (derived from `cap/lmp/lmp_wrapper.py::setup_LMP`) appear as `Call` nodes |
+| Does not echo the query | `no_echo` | First non-blank line is not `# Query: ...` |
+| No repetition loops | `no_repetition` | No consecutive identical non-blank lines |
 | Stops at correct boundary | `stops_correctly` | Output does not bleed past `# Query:` or `objects =` markers |
-| Overall | `pass` | All five criteria are `true` |
+| Overall | `pass` | All non-null criteria are `true` |
 
-Automated check (where feasible):
+Canonical command (v5):
 ```bash
-python offline/evaluate_outputs.py \
-  --outputs demo/outputs_llama3.jsonl \
-  --cap-api-list offline/cap_api_allowlist.txt \
-  --output demo/outputs_llama3_evaluated.jsonl
+conda run -n cap-vllm python offline/evaluate_outputs.py \
+  --outputs demo/outputs_llama3_v5_diverse.jsonl \
+  --output  demo/outputs_llama3_v5_evaluated.jsonl
 ```
 
-> **Note:** `offline/evaluate_outputs.py` and `offline/cap_api_allowlist.txt` do not yet exist.
-> Until written, fill the `quality` block manually after inspecting each output.
+`--cap-api-list` is optional — omitting it uses the built-in default allowlist (the
+authoritative source, matched to `cap/lmp/lmp_wrapper.py::setup_LMP`'s `variable_vars`
+and `fixed_vars`). A standalone `offline/cap_api_allowlist.txt` file would drift from
+the wrapper; prefer the built-in default.
 
 ### 3b — Build the quality report
 
-Once `demo/outputs_llama3_evaluated.jsonl` is ready:
-
 ```bash
-python offline/build_quality_report.py \
-  --outputs demo/outputs_llama3_evaluated.jsonl \
-  --prompts demo/prompts.jsonl \
-  --output demo/quality_report.md
+conda run -n cap-vllm python offline/build_quality_report.py \
+  --outputs     demo/outputs_llama3_v5_evaluated.jsonl \
+  --prompts     demo/prompts_v1_context.jsonl \
+  --version     v5_diverse \
+  --description "Strict-API + diverse BEHAVIOR few-shots (final)" \
+  --output      demo/quality_report_v5_diverse.md
 ```
 
-> **Note:** `offline/build_quality_report.py` does not yet exist. Until written, draft
-> `demo/quality_report.md` manually using the structure described in the File Formats section.
+Report sections produced (matches the File Formats spec):
+1. **Summary** — prompt count, overall pass rate, average code length
+2. **Per-Criterion Pass Rates** (+ API-usage distribution + difficulty/category breakdowns)
+3. **Prompt-by-Prompt Results** — one row per prompt with the generated code, verdict and failure reasons
+4. **Notable Observations** — auto-derived from call counts (hallucinated API detection, sub-LMP coverage, for-loop usage)
+5. **Conclusion & Recommendation** — DARPA-facing verdict line
+
+Naming convention for iterations: `demo/quality_report_<version>.md` (e.g.
+`quality_report_v5_diverse.md`). Keep one report per artifact so older versions
+remain comparable; do not overwrite.
 
 ### Reporting Process — Inputs and Outputs at Each Stage
 
@@ -577,21 +656,21 @@ EAI prompt files                   Step 0: extract_cap_prompts.py    demo/prompt
   (behavior/action_sequencing,       (Extractor Agent)               (~47 CaP-compatible candidates)
    virtualHome/action_sequencing)
 
-demo/prompts_candidates.jsonl      Step 0b: verify_prompts.py        demo/prompts.jsonl
-  + vLLM server @ :8000              (Verifier Agent)                (10–20 validated, curated prompts)
+demo/prompts_candidates.jsonl      Step 0b: add_context_to_prompts   demo/prompts_v1_context.jsonl
+                                     (per-prompt object context)     (context field per record)
 
-demo/prompts.jsonl                 Step 2b: batch generation         demo/outputs_llama3.jsonl
-  + vLLM server @ :8000
+demo/prompts_v1_context.jsonl      Step 2b: batch_lmp_codegen        demo/outputs_llama3_<ver>.jsonl
+  + vLLM server @ :8000                                              (generated code + inline quality)
 
-demo/outputs_llama3.jsonl          Step 3a: quality check            demo/outputs_llama3_evaluated.jsonl
-  + cap_api_allowlist.txt                                            (quality flags per record)
+demo/outputs_llama3_<ver>.jsonl    Step 3a: evaluate_outputs.py      demo/outputs_llama3_<ver>_evaluated.jsonl
+  (+ built-in allowlist)                                             (recomputed quality flags + no_echo)
 
-demo/outputs_llama3_evaluated      Step 3b: report build             demo/quality_report.md
-  + demo/prompts.jsonl                                               (DARPA-ready document)
+demo/outputs_llama3_<ver>_eval.    Step 3b: build_quality_report.py  demo/quality_report_<ver>.md
+  + demo/prompts_v1_context.jsonl                                    (DARPA-ready document)
 ```
 
-The final handoff to DARPA reporting is `demo/quality_report.md` plus
-`demo/outputs_llama3_evaluated.jsonl` as raw evidence.
+The final handoff to DARPA reporting is `demo/quality_report_v5_diverse.md` plus
+`demo/outputs_llama3_v5_evaluated.jsonl` as raw evidence.
 
 ---
 

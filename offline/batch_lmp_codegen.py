@@ -210,12 +210,15 @@ def _check_no_repetition(code: str) -> bool:
 
 def _check_stops_correctly(code: str) -> bool:
     """
-    Return True if the code does not contain any CaP stop-token prefix that
-    would indicate the model generated past the expected boundary.
+    Return True if no *line* in the generated code starts with a CaP stop-token
+    prefix. Legitimate uses of these tokens inside f-strings (e.g.
+    ``f'objects = {get_obj_names()}'`` passed to ``parse_obj_name``) are allowed.
     """
-    for prefix in _STOP_TOKEN_PREFIXES:
-        if prefix in code:
-            return False
+    for line in code.splitlines():
+        stripped = line.lstrip()
+        for prefix in _STOP_TOKEN_PREFIXES:
+            if stripped.startswith(prefix):
+                return False
     return True
 
 

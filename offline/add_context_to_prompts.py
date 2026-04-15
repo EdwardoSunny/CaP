@@ -72,33 +72,43 @@ def extract_destination(query: str) -> str | None:
     return None
 
 
-def build_context_field(record: dict) -> str:
+def build_context_field(record: dict, keep_duplicates: bool = False) -> str:
     """
     Build the `context` string from the record's `objects` field, supplemented
     by any destination object extracted from the `query` field.
 
     Returns a Python-syntax string ready to be appended to the LMP prompt, e.g.:
         objects = ['notebook', 'hardback', 'carton']
+
+    When keep_duplicates=True, the full `objects` list is preserved (minus
+    redundant duplicates of the destination). This signals to the LLM that
+    there are multiple instances of the same type, encouraging use of
+    parse_obj_name('the books', ...) + for-loop patterns instead of
+    enumerating unique names by hand.
     """
     raw_objects: list[str] = record.get("objects", [])
 
-    # Deduplicate while preserving order.
-    seen: set[str] = set()
-    unique_objs: list[str] = []
-    for obj in raw_objects:
-        key = obj.lower().strip()
-        if key not in seen:
-            seen.add(key)
-            unique_objs.append(obj.strip())
+    if keep_duplicates:
+        # Preserve every instance; only deduplicate if the destination duplicates one.
+        objs = [o.strip() for o in raw_objects]
+        seen_lower = {o.lower() for o in objs}
+    else:
+        # Deduplicate while preserving order.
+        seen_lower: set[str] = set()
+        objs: list[str] = []
+        for obj in raw_objects:
+            key = obj.lower().strip()
+            if key not in seen_lower:
+                seen_lower.add(key)
+                objs.append(obj.strip())
 
     # Try to add destination if not already covered.
     query = record.get("query", "")
     dest = extract_destination(query)
-    if dest and dest.lower() not in seen:
-        unique_objs.append(dest)
+    if dest and dest.lower() not in seen_lower:
+        objs.append(dest)
 
-    # Format as Python list literal.
-    items_str = ", ".join(f"'{o}'" for o in unique_objs)
+    items_str = ", ".join(f"'{o}'" for o in objs)
     return f"objects = [{items_str}]"
 
 
@@ -112,6 +122,9 @@ def main():
     )
     parser.add_argument("--input",  required=True, help="Input JSONL (prompts_candidates.jsonl)")
     parser.add_argument("--output", required=True, help="Output JSONL (prompts_v1_context.jsonl)")
+    parser.add_argument("--keep-duplicates", action="store_true",
+                        help="Keep every instance in the objects list (signal multi-instance "
+                             "scenes — encourages parse_obj_name + for-loop usage in generation)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -133,7 +146,7 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w") as f:
         for rec in records:
-            context = build_context_field(rec)
+            context = build_context_field(rec, keep_duplicates=args.keep_duplicates)
             rec["context"] = context
             if args.verbose:
                 print(f"  {rec['id']}: {context}")
