@@ -31,6 +31,7 @@ def main(
     vllm_host=None,   # e.g. "scai4.cs.ucla.edu:8000"
     max_tokens=None,  # Override max output tokens for smaller models
     context_window=None,  # Model context window size (enables few-shot truncation)
+    plan_mode="python",   # "python" (Code-as-Policies DSL) or "json" (VH-style action plan)
 ):
     dt = 1.0 / frequency
     output_dir = pathlib.Path(output)
@@ -63,7 +64,7 @@ def main(
             time.sleep(1)
 
             config = load_config("configs/real_config.yaml")
-            lmp_tabletop_ui, lmp_env = setup_LMP(config, env, xarm_config, grasp_strategy="hardcode", model=model, vllm_host=vllm_host, max_tokens=max_tokens, context_window=context_window)
+            lmp_tabletop_ui, lmp_env = setup_LMP(config, env, xarm_config, grasp_strategy="hardcode", model=model, vllm_host=vllm_host, max_tokens=max_tokens, context_window=context_window, plan_mode=plan_mode)
 
             logger.info("=" * 60)
             logger.info("Init Success")
@@ -84,5 +85,7 @@ if __name__ == "__main__":
     parser.add_argument("--vllm-host", default=None, help="vLLM server host:port, e.g. scai4.cs.ucla.edu:8000")
     parser.add_argument("--max-tokens", type=int, default=None, help="Override max output tokens")
     parser.add_argument("--context-window", type=int, default=None, help="Model context window size (enables auto few-shot truncation)")
+    parser.add_argument("--plan-mode", choices=["python", "json"], default="python",
+                        help="'python' = Code-as-Policies DSL (default). 'json' = VirtualHome-style action plan.")
     args = parser.parse_args()
-    main(model=args.model, vllm_host=args.vllm_host, max_tokens=args.max_tokens, context_window=args.context_window)
+    main(model=args.model, vllm_host=args.vllm_host, max_tokens=args.max_tokens, context_window=args.context_window, plan_mode=args.plan_mode)

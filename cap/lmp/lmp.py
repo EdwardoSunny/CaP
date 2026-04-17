@@ -213,7 +213,17 @@ class LMP:
     def __call__(self, query, context="", **kwargs):
         prompt, use_query = self.build_prompt(query, context=context)
         print(f"[DEBUG LMP {self._name}] prompt length: {len(prompt)} chars, use_query: {use_query!r}")
-        system_msg = "You are a helpful assistant that pays attention to the user's instructions and writes good python code for operating a robot arm in a tabletop environment. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran. Do not repeat my code, just complete/continue from my code. Do not import any packages that aren't already there, you should never use the import keyword since all packages you need are already imported in the examples."
+        output_format = self._cfg.get("output_format", "python")
+        if output_format == "json_actions":
+            system_msg = (
+                "You are a task planner for a robot. Output ONLY a single JSON object whose keys are "
+                "action names (e.g. WALK, GRAB, PUTON, PUTIN, OPEN, CLOSE, SWITCHON, SWITCHOFF, LOOKAT, TOUCH) "
+                "and whose values are argument arrays like [name, id] or [obj, obj_id, target, target_id]. "
+                "Emit actions in the order they should execute. Do not explain, do not wrap in markdown, "
+                "do not repeat the query."
+            )
+        else:
+            system_msg = "You are a helpful assistant that pays attention to the user's instructions and writes good python code for operating a robot arm in a tabletop environment. Only output python code with no explanation (code comments are ok) or formatting, it should be ready to parse directly and ran. Do not repeat my code, just complete/continue from my code. Do not import any packages that aren't already there, you should never use the import keyword since all packages you need are already imported in the examples."
         while True:
             try:
                 if self._use_chat:
@@ -259,6 +269,26 @@ class LMP:
                 print(f"OpenAI API got err {e}")
                 print("Retrying after 10s.")
                 sleep(10)
+
+        if output_format == "json_actions":
+            to_log = f"{use_query}\n{code_str}"
+            print(f"LMP {self._name} plan:\n\n{to_log}\n")
+            self.exec_hist += f"\n{code_str}"
+            if self._cfg.get("debug_mode"):
+                return code_str
+            adapter = self._cfg.get("_json_adapter")
+            action_map = self._cfg.get("_action_map")
+            if adapter is None or action_map is None:
+                raise RuntimeError(
+                    f"LMP {self._name} is in json_actions mode but _json_adapter / "
+                    "_action_map were not wired in. See setup_LMP()."
+                )
+            from cap.lmp.json_dispatcher import run_json_plan
+            results = run_json_plan(code_str, adapter, action_map,
+                                    strict=self._cfg.get("strict_actions", False))
+            if self._cfg["has_return"]:
+                return results
+            return None
 
         if self._cfg["include_context"] and context != "":
             to_exec = f"{context}\n{code_str}"

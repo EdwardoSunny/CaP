@@ -24,7 +24,28 @@ lmp_config:
       has_return: false
       return_val_name: ret_val
       load_cache: true
-      debug_mode: false 
+      debug_mode: false
+      output_format: python
+
+    tabletop_ui_json:
+      prompt_fname: tabletop_ui_json_prompt
+      model: gpt-5-nano
+      max_tokens: 4096
+      temperature: 0
+      query_prefix: "# Query: "
+      query_suffix: "."
+      stop:
+        - "# Query: "
+        - "objects = "
+      maintain_session: false
+      include_context: false
+      has_return: false
+      return_val_name: ret_val
+      load_cache: true
+      debug_mode: false
+      output_format: json_actions
+      action_map_fname: action_map
+      strict_actions: false
     
     parse_obj_name:
       prompt_fname: parse_obj_name_prompt

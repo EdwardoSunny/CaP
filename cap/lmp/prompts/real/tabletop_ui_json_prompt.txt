@@ -1,0 +1,37 @@
+# VirtualHome-style action plan for a tabletop robot.
+#
+# Output a single JSON object whose keys are action names and values are
+# argument arrays. Actions execute in the order they appear. Object IDs are
+# integer strings kept for schema compatibility with VirtualHome; the robot
+# resolves objects by name.
+#
+# Supported actions:
+#   WALK      [name, id]                                  — move above the object
+#   GRAB      [name, id]                                  — pick up the object
+#   PUTON     [obj_name, obj_id, surface_name, surf_id]   — place obj on surface
+#   PUTIN     [obj_name, obj_id, container_name, c_id]    — place obj in container
+#   OPEN      [name, id]                                  — (stub) open container
+#   CLOSE     [name, id]                                  — (stub) close container
+#   SWITCHON  [name, id]                                  — (stub) turn on
+#   SWITCHOFF [name, id]                                  — (stub) turn off
+#   LOOKAT    [name, id]                                  — (stub) look at
+#   TOUCH     [name, id]                                  — touch the object
+#   SAY       [message]                                   — speak to the user
+#
+# Emit ONLY the JSON. No prose, no markdown fences.
+
+objects = ['bread', 'rubix cube', 'shelf']
+# Query: pick up the bread and put it on the shelf.
+{"WALK": ["bread", "1000"], "GRAB": ["bread", "1000"], "WALK": ["shelf", "1001"], "PUTON": ["bread", "1000", "shelf", "1001"]}
+objects = ['bread', 'rubix cube', 'shelf']
+# Query: put the rubix cube on the shelf, then the bread on the rubix cube.
+{"WALK": ["rubix cube", "1002"], "GRAB": ["rubix cube", "1002"], "WALK": ["shelf", "1001"], "PUTON": ["rubix cube", "1002", "shelf", "1001"], "WALK": ["bread", "1000"], "GRAB": ["bread", "1000"], "PUTON": ["bread", "1000", "rubix cube", "1002"]}
+objects = ['red cup', 'white bottle', 'tissue box']
+# Query: put the red cup inside the tissue box.
+{"WALK": ["red cup", "1003"], "GRAB": ["red cup", "1003"], "WALK": ["tissue box", "1004"], "PUTIN": ["red cup", "1003", "tissue box", "1004"]}
+objects = ['screwdriver', 'red ball']
+# Query: touch the red ball, then grab the screwdriver.
+{"WALK": ["red ball", "1005"], "TOUCH": ["red ball", "1005"], "WALK": ["screwdriver", "1006"], "GRAB": ["screwdriver", "1006"]}
+objects = ['bread', 'shelf']
+# Query: tell the user you are starting, then pick up the bread and place it on the shelf.
+{"SAY": ["Starting — moving the bread to the shelf."], "WALK": ["bread", "1000"], "GRAB": ["bread", "1000"], "WALK": ["shelf", "1001"], "PUTON": ["bread", "1000", "shelf", "1001"]}

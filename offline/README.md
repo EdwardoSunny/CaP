@@ -1,16 +1,20 @@
 # Offline LMP Code Generation
 
-Test LLM code generation without a robot or cameras. Generates the Python code that CaP would execute for a given task.
+Test LLM code/plan generation without a robot or cameras. Generates the output that CaP would execute for a given task, in either Python-DSL or VirtualHome-style JSON.
 
 ## Usage
 
 Run from the repo root:
 
 ```bash
-# Default (gpt-5-nano via OpenAI API)
+# Default (gpt-5-nano via OpenAI API) — Python DSL
 python offline/lmp_codegen_test.py "pick up the box and place it on the battery"
 
-# Local vLLM model
+# VirtualHome-style JSON action plan
+python offline/lmp_codegen_test.py "pick up the bread and put it on the shelf" \
+  --plan-mode json
+
+# Local vLLM model (works in either mode)
 python offline/lmp_codegen_test.py "stack the blocks" \
   --model meta-llama/Meta-Llama-3-8B-Instruct \
   --vllm-host scai5.cs.ucla.edu:8000 \
@@ -44,3 +48,9 @@ If `--context-window` is not set, no truncation happens (fine for large-context 
 | `--few-shot-file` | Custom prompt file to replace the default few-shot examples |
 | `--show-prompt` | Print the full prompt sent to the LLM |
 | `--json` | Output results as JSON |
+| `--plan-mode` | `python` (default) or `json` — selects the Code-as-Policies DSL or VirtualHome-style action plan. |
+
+## Plan modes
+
+- `--plan-mode python` loads the `tabletop_ui` LMP and its Python few-shot prompt.
+- `--plan-mode json` loads the `tabletop_ui_json` LMP, uses a planner system prompt, and prints the raw JSON plan from the model **plus** a parsed view. The parser tolerates ``` ```json ``` fences, trailing prose, and VirtualHome duplicate keys (e.g. repeated `"WALK"`). No robot is touched — this script only generates text.

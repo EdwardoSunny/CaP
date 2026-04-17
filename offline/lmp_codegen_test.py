@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Generate CaP LMP code without executing generated code."""
+"""Generate CaP LMP code without executing generated code.
+
+Supports two plan modes matching the online runtime:
+  * --plan-mode python  (default) → Code-as-Policies Python DSL
+  * --plan-mode json              → VirtualHome-style JSON action plans
+"""
 
 import argparse
 import copy
@@ -18,10 +23,34 @@ if str(REPO_ROOT) not in sys.path:
 from cap.lmp.lmp import LMP, LMPFGen, _strip_echoed_query, _trim_at_stop_tokens
 from cap.lmp.utils import load_config
 
+_PYTHON_SYSTEM_MSG = (
+    "You are a helpful assistant that pays attention to the user's instructions "
+    "and writes good python code for operating a robot arm in a tabletop "
+    "environment. Only output python code with no explanation (code comments "
+    "are ok) or formatting, it should be ready to parse directly and ran. Do "
+    "not repeat my code, just complete/continue from my code. Do not import any "
+    "packages that aren't already there, you should never use the import keyword "
+    "since all packages you need are already imported in the examples."
+)
+
+_JSON_SYSTEM_MSG = (
+    "You are a task planner for a robot. Output ONLY a single JSON object whose keys are "
+    "action names (e.g. WALK, GRAB, PUTON, PUTIN, OPEN, CLOSE, SWITCHON, SWITCHOFF, LOOKAT, TOUCH) "
+    "and whose values are argument arrays like [name, id] or [obj, obj_id, target, target_id]. "
+    "Emit actions in the order they should execute. Do not explain, do not wrap in markdown, "
+    "do not repeat the query."
+)
+
+_LMP_NAME_BY_MODE = {"python": "tabletop_ui", "json": "tabletop_ui_json"}
+
 
 def build_tabletop_lmp(config_path: str, few_shot_override: str | None = None,
                        model: str | None = None, vllm_host: str | None = None,
-                       max_tokens: int | None = None, context_window: int | None = None) -> LMP:
+                       max_tokens: int | None = None, context_window: int | None = None,
+                       plan_mode: str = "python") -> LMP:
+    if plan_mode not in _LMP_NAME_BY_MODE:
+        raise ValueError(f"Unknown plan_mode: {plan_mode!r} (expected 'python' or 'json')")
+
     config = load_config(config_path)
     lmps_cfg = config["lmp_config"]["lmps"]
 
@@ -46,11 +75,16 @@ def build_tabletop_lmp(config_path: str, few_shot_override: str | None = None,
 
     fgen = LMPFGen(lmps_cfg["fgen"], fixed_vars, variable_vars)
 
-    tabletop_cfg = copy.deepcopy(lmps_cfg["tabletop_ui"])
+    lmp_name = _LMP_NAME_BY_MODE[plan_mode]
+    if lmp_name not in lmps_cfg:
+        raise KeyError(
+            f"Config {config_path} has no LMP entry '{lmp_name}' for plan_mode={plan_mode!r}"
+        )
+    tabletop_cfg = copy.deepcopy(lmps_cfg[lmp_name])
     tabletop_cfg["debug_mode"] = True
 
     lmp = LMP(
-        "tabletop_ui",
+        lmp_name,
         tabletop_cfg,
         fgen,
         fixed_vars,
@@ -65,15 +99,8 @@ def build_tabletop_lmp(config_path: str, few_shot_override: str | None = None,
 
 def generate_code(lmp: LMP, query: str, context: str = "") -> dict[str, str]:
     prompt, use_query = lmp.build_prompt(query, context=context)
-    system_msg = (
-        "You are a helpful assistant that pays attention to the user's instructions "
-        "and writes good python code for operating a robot arm in a tabletop "
-        "environment. Only output python code with no explanation (code comments "
-        "are ok) or formatting, it should be ready to parse directly and ran. Do "
-        "not repeat my code, just complete/continue from my code. Do not import any "
-        "packages that aren't already there, you should never use the import keyword "
-        "since all packages you need are already imported in the examples."
-    )
+    output_format = lmp._cfg.get("output_format", "python")
+    system_msg = _JSON_SYSTEM_MSG if output_format == "json_actions" else _PYTHON_SYSTEM_MSG
 
     while True:
         try:
@@ -114,7 +141,24 @@ def generate_code(lmp: LMP, query: str, context: str = "") -> dict[str, str]:
             print("Retrying after 10s.")
             sleep(10)
 
-    return {"prompt": prompt, "use_query": use_query, "code": code_str}
+    parsed_plan = None
+    if output_format == "json_actions":
+        try:
+            from cap.lmp.json_dispatcher import parse_vh_plan
+            parsed_plan = [
+                {"action": a, "args": list(args) if isinstance(args, (list, tuple)) else [args]}
+                for a, args in parse_vh_plan(code_str)
+            ]
+        except Exception as e:
+            parsed_plan = {"error": str(e)}
+
+    return {
+        "prompt": prompt,
+        "use_query": use_query,
+        "code": code_str,
+        "output_format": output_format,
+        "parsed_plan": parsed_plan,
+    }
 
 
 def main():
@@ -169,6 +213,12 @@ def main():
         default=None,
         help="Model context window size in tokens (enables auto few-shot truncation).",
     )
+    parser.add_argument(
+        "--plan-mode",
+        choices=["python", "json"],
+        default="python",
+        help="'python' = Code-as-Policies DSL (default). 'json' = VirtualHome-style action plan.",
+    )
     args = parser.parse_args()
 
     few_shot_override = None
@@ -177,7 +227,8 @@ def main():
 
     lmp = build_tabletop_lmp(args.config, few_shot_override=few_shot_override,
                              model=args.model, vllm_host=args.vllm_host,
-                             max_tokens=args.max_tokens, context_window=args.context_window)
+                             max_tokens=args.max_tokens, context_window=args.context_window,
+                             plan_mode=args.plan_mode)
     result = generate_code(lmp, args.query, context=args.context)
 
     if args.json:
@@ -185,7 +236,9 @@ def main():
             json.dumps(
                 {
                     "query": result["use_query"],
+                    "output_format": result["output_format"],
                     "code": result["code"],
+                    "parsed_plan": result["parsed_plan"],
                     "prompt": result["prompt"] if args.show_prompt else None,
                 },
                 indent=2,
@@ -200,10 +253,18 @@ def main():
         print(result["prompt"])
         print()
 
+    header = "GENERATED PLAN" if result["output_format"] == "json_actions" else "GENERATED CODE"
     print("=" * 80)
-    print("GENERATED CODE")
+    print(header)
     print("=" * 80)
     print(result["code"])
+
+    if result["parsed_plan"] is not None:
+        print()
+        print("=" * 80)
+        print("PARSED ACTIONS")
+        print("=" * 80)
+        print(json.dumps(result["parsed_plan"], indent=2))
 
 
 if __name__ == "__main__":

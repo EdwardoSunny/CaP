@@ -533,7 +533,7 @@ class LMPWrapper:
 # Factory function — wires everything together
 # ---------------------------------------------------------------------------
 
-def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, vllm_host=None, max_tokens=None, context_window=None):
+def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, vllm_host=None, max_tokens=None, context_window=None, plan_mode="python"):
     """
     Setup the full LMP system.
 
@@ -683,12 +683,34 @@ def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, v
     print("=" * 40)
     print(variable_vars)
 
-    lmp_tabletop_ui = LMP(
-        "tabletop_ui",
-        config["lmp_config"]["lmps"]["tabletop_ui"],
-        lmp_fgen,
-        fixed_vars,
-        variable_vars,
-    )
+    if plan_mode == "json":
+        from cap.lmp.vh_action_adapter import VirtualHomeActionAdapter
+        from cap.lmp.utils import load_config
+
+        tabletop_cfg = config["lmp_config"]["lmps"]["tabletop_ui_json"]
+        action_map_fname = tabletop_cfg.get("action_map_fname", "action_map")
+        action_map_path = project_root / "configs" / f"{action_map_fname}.yaml"
+        action_map = load_config(str(action_map_path))
+        adapter = VirtualHomeActionAdapter(LMP_env)
+        tabletop_cfg["_json_adapter"] = adapter
+        tabletop_cfg["_action_map"] = action_map
+
+        lmp_tabletop_ui = LMP(
+            "tabletop_ui_json",
+            tabletop_cfg,
+            lmp_fgen,
+            fixed_vars,
+            variable_vars,
+        )
+    elif plan_mode == "python":
+        lmp_tabletop_ui = LMP(
+            "tabletop_ui",
+            config["lmp_config"]["lmps"]["tabletop_ui"],
+            lmp_fgen,
+            fixed_vars,
+            variable_vars,
+        )
+    else:
+        raise ValueError(f"Unknown plan_mode: {plan_mode!r} (expected 'python' or 'json')")
 
     return lmp_tabletop_ui, LMP_env

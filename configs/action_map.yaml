@@ -1,0 +1,55 @@
+# VirtualHome-style action → CaP adapter method mapping.
+#
+# Each entry names a method on cap.lmp.vh_action_adapter.VirtualHomeActionAdapter
+# and lists positional argument slot names for documentation/validation only.
+#
+# The JSON plan emits entries shaped like VirtualHome AS outputs, e.g.:
+#   {"WALK": ["washing_machine", "1001"], "GRAB": ["soap", "1002"], ...}
+#
+# Object IDs (the integer strings) are ignored at execution time — CaP
+# identifies objects by name via perception. They are kept in the schema so
+# the same prompt/model output works for both VH and CaP backends.
+
+WALK:
+  method: walk
+  args: [name, id]
+
+GRAB:
+  method: grab
+  args: [name, id]
+
+PUTON:
+  method: put_on
+  args: [obj_name, obj_id, surface_name, surface_id]
+
+PUTIN:
+  method: put_in
+  args: [obj_name, obj_id, container_name, container_id]
+
+OPEN:
+  method: open
+  args: [name, id]
+
+CLOSE:
+  method: close
+  args: [name, id]
+
+SWITCHON:
+  method: switch_on
+  args: [name, id]
+
+SWITCHOFF:
+  method: switch_off
+  args: [name, id]
+
+LOOKAT:
+  method: look_at
+  args: [name, id]
+
+TOUCH:
+  method: touch
+  args: [name, id]
+
+SAY:
+  method: say
+  args: [message]
