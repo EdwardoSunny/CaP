@@ -355,6 +355,35 @@ class LMPWrapper:
     # Compound motions
     # ------------------------------------------------------------------
 
+    def pick(self, pick_pos, approach_offset=100.0, stage_val=0):
+        """Pick an object at pick_pos: approach from above, open, descend, close, retreat.
+
+        Args:
+            pick_pos: Pick target — [x,y,z], [x,y,z,r,p,y], or [x,y] (mm/deg).
+            approach_offset: How far above the target (mm) to approach from.
+            stage_val: Stage value for action recording.
+        """
+        try:
+            pick_pos_xyz = np.array(pick_pos[:3], dtype=np.float64)
+            approach_pick = np.array([pick_pos_xyz[0], pick_pos_xyz[1], pick_pos_xyz[2] + approach_offset])
+
+            logger.info(f"Pick: {pick_pos_xyz}  (approach offset {approach_offset} mm)")
+
+            self.goto_pos(approach_pick, duration=3.0, stage_val=stage_val)
+            self.open_gripper(stage_val)
+            time.sleep(0.5)
+            self.goto_pos(pick_pos, duration=2.0, stage_val=stage_val)
+            self.close_gripper(stage_val)
+            time.sleep(1.0)
+            self.goto_pos(approach_pick, duration=2.0, stage_val=stage_val)
+
+            logger.info("Pick completed successfully")
+            return True
+
+        except Exception as e:
+            logger.error(f"Pick failed: {e}")
+            return False
+
     def pick_place(
         self, pick_pos, place_pos,
         approach_offset=100.0, place_offset=50.0,
@@ -370,23 +399,14 @@ class LMPWrapper:
             stage_val: Stage value for action recording.
         """
         try:
-            pick_pos_xyz = np.array(pick_pos[:3], dtype=np.float64)
-            place_pos_xyz = np.array(place_pos[:3], dtype=np.float64)
+            if not self.pick(pick_pos, approach_offset=approach_offset, stage_val=stage_val):
+                return False
 
-            # Approach points: directly above pick/place targets
-            approach_pick = np.array([pick_pos_xyz[0], pick_pos_xyz[1], pick_pos_xyz[2] + approach_offset])
+            place_pos_xyz = np.array(place_pos[:3], dtype=np.float64)
             approach_place = np.array([place_pos_xyz[0], place_pos_xyz[1], place_pos_xyz[2] + approach_offset])
 
-            logger.info(f"Pick and place: {pick_pos_xyz} -> {place_pos_xyz}")
-            logger.info(f"  Approach offset: {approach_offset} mm, Place offset: {place_offset} mm")
+            logger.info(f"Place: {place_pos_xyz}  (place offset {place_offset} mm)")
 
-            self.goto_pos(approach_pick, duration=3.0, stage_val=stage_val)
-            self.open_gripper(stage_val)
-            time.sleep(0.5)
-            self.goto_pos(pick_pos, duration=2.0, stage_val=stage_val)
-            self.close_gripper(stage_val)
-            time.sleep(1.0)
-            self.goto_pos(approach_pick, duration=2.0, stage_val=stage_val)
             self.goto_pos(approach_place, duration=3.0, stage_val=stage_val)
             # Place above the target to avoid pressing into the table
             place_above = np.array([place_pos_xyz[0], place_pos_xyz[1], place_pos_xyz[2] + place_offset])
@@ -533,7 +553,7 @@ class LMPWrapper:
 # Factory function — wires everything together
 # ---------------------------------------------------------------------------
 
-def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, vllm_host=None, max_tokens=None, context_window=None, plan_mode="python"):
+def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, vllm_host=None, max_tokens=None, context_window=None, plan_mode="python", hardcoded_traj_dir=None):
     """
     Setup the full LMP system.
 
@@ -637,6 +657,7 @@ def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, v
         "move_relative": LMP_env.move_relative,
         "move_up": LMP_env.move_up,
         "move_down": LMP_env.move_down,
+        "pick": LMP_env.pick,
         "pick_place": LMP_env.pick_place,
         "follow_traj": LMP_env.follow_traj,
         "wait": LMP_env.wait,
@@ -691,7 +712,11 @@ def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, v
         action_map_fname = tabletop_cfg.get("action_map_fname", "action_map")
         action_map_path = project_root / "configs" / f"{action_map_fname}.yaml"
         action_map = load_config(str(action_map_path))
-        adapter = VirtualHomeActionAdapter(LMP_env)
+        if hardcoded_traj_dir:
+            from cap.lmp.waypoint_action_adapter import HardcodedActionAdapter
+            adapter = HardcodedActionAdapter(LMP_env, hardcoded_traj_dir)
+        else:
+            adapter = VirtualHomeActionAdapter(LMP_env)
         tabletop_cfg["_json_adapter"] = adapter
         tabletop_cfg["_action_map"] = action_map
 

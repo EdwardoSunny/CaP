@@ -1,0 +1,6 @@
+# put_in.txt — drop held object into the dishwasher.
+# Format: x, y, z, rx, ry, rz[, duration]   (mm, degrees, seconds)
+
+656.5, 27.6, 204.1, -179.7, -35.7, 2.1
+OPEN
+END

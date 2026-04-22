@@ -43,14 +43,8 @@ class VirtualHomeActionAdapter:
 
     def grab(self, name: str, id: Optional[str] = None):
         pose = self._env.get_obj_pos(name)
-        pos = np.array(pose[:3], dtype=np.float64)
-        above = pos + np.array([0.0, 0.0, self._approach_offset_mm])
         logger.info(f"[VH] GRAB → {name}")
-        self._env.goto_pos(above.tolist())
-        self._env.open_gripper()
-        self._env.goto_pos(pose)
-        self._env.close_gripper()
-        self._env.goto_pos(above.tolist())
+        self._env.pick(pose, approach_offset=self._approach_offset_mm)
 
     def put_on(self, obj_name: str, obj_id: Optional[str],
                surface_name: str, surface_id: Optional[str] = None):
