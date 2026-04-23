@@ -425,7 +425,341 @@ python offline/batch_lmp_codegen.py \
 
 ---
 
+## Step 2c — Two-Level Ctrl-G Instead of Prompt Engineering
+
+**Goal.** Replace the v1–v5 prompt-engineering iterations with a principled constrained-decoding
+fix: the same Llama 3 8B that produced the v0 failures is wrapped in the two-level Ctrl-G
+pipeline from `/home/ubuntu/tianyi/EmbodiedAgents/eai_ctrlg`. This forces every generated token
+to belong to a sequence that (1) is syntactically a valid CaP program (γ DFA) and (2) is
+semantically grounded in the scene's objects and the CaP API's action arity (β DFA / HMM).
+No change to the prompt, few-shots, or system message is required — the model sees exactly
+what v0 saw, but the decoder is no longer allowed to emit hallucinated API names or
+mis-typed destinations.
+
+### Why Ctrl-G, not more prompt engineering
+
+The v1→v5 history shows a repeating failure mode: every fix that eliminates one bad pattern
+(e.g. `goto_pos` fallback in v4) introduces a new one (e.g. pattern collapse in v4, or
+`stops_correctly` regressions in v5). The underlying problem is that an 8B model does not
+reliably respect a soft constraint expressed only in few-shot examples — the constraint has
+to be enforced at decoding time. Ctrl-G provides exactly that:
+
+| Failure class at v0 | Soft fix in v1–v5 | Hard fix via Ctrl-G |
+|---|---|---|
+| Model calls `goto_pos(...)` (not in CaP API) | Delete `goto_pos` examples from prompt (v2) | γ DFA allowlist rejects `goto_pos` token-by-token |
+| Model calls `stack_objects_in_order(...)` (not in CaP API) | Strip it from prompt + re-script examples (v4) | γ DFA allowlist rejects it |
+| Model calls `say(...)` (debug wrapper, not a robot action) | Strip narration (v4) | γ DFA allowlist rejects it |
+| Model echoes the query or runs past `# Query:` marker | Manual stop-token post-processing | γ DFA terminates at EOS on valid completion |
+| Model emits empty / un-parseable output (c016, c017) | None — these still fail at v5 | γ DFA guarantees syntactic validity by construction |
+| Destination string not in the scene's object list | Not addressed | β world model rejects IDs outside `get_obj_names()` |
+| `put_first_on_second(x, y)` with `x == y` (c013, c021, c022, c023: "put cartons into the carton") | Not addressed | β world: `src != dst` constraint on apply |
+| Pattern collapse to single `put_first_on_second` line (v4) | Add diverse examples (v5) | HMM log-prior over action multiplicity |
+
+### Mapping the two Ctrl-G levels onto CaP
+
+`eai_ctrlg` currently ships DFAs for BEHAVIOR/VirtualHome JSON action-sequencing outputs
+(`ctrlg/dfa.py`, `ctrlg/beta_dfa.py`). For CaP we need to author the equivalent two DFAs over
+the **CaP Python subset**:
+
+1. **γ token DFA — CaP Python syntax + API allowlist.**
+   Implemented as a new `ctrlg/dfa_cap.py::CaPCodegenDFA`. States encode: import-line skipped,
+   at statement boundary, inside a call expression, inside an argument literal, end-of-line.
+   The allowlist over call-head tokens is sourced directly from `cap/lmp/lmp_wrapper.py::setup_LMP`
+   (`variable_vars` + `fixed_vars`) — the same authoritative source that
+   `offline/batch_lmp_codegen.py::_DEFAULT_CAP_API` already uses. This eliminates every
+   `goto_pos` / `say` / `stack_objects_in_order` failure by construction.
+
+2. **β meta DFA — scene-grounded semantics.**
+   Implemented as `ctrlg/beta/cap_beta_world.py::CaPBetaWorld`. The "world" state is
+   `(objects_on_table: set[str], held: Optional[str])`, populated from each prompt's
+   `context` field (already produced by `offline/add_context_to_prompts.py`).
+   Valid β-actions:
+   - `put_first_on_second(src, dst)` with `src ∈ objects ∧ dst ∈ objects ∪ {parse_position(...)} ∧ src ≠ dst`
+   - `parse_obj_name(group_phrase, 'objects = {get_obj_names()}')` followed by a
+     `for ... in ...: put_first_on_second(...)` block
+   - `parse_position(spatial_phrase)` only as the 2nd arg of `put_first_on_second`
+
+   This catches c013/c021/c022/c023 (source = destination), c016/c017 (empty output is not a
+   valid β-action), and any "put books into the dishwasher" where `books` is only resolvable
+   through `parse_obj_name` (β forces the `parse_obj_name + for-loop` pattern for plural nouns).
+
+3. **HMM (optional, gamma-scale tunable).**
+   The BEHAVIOR HMM shipped at `eai_ctrlg/models/behavior/hmm-h128-lr0.01/checkpoint.eqx`
+   was trained on BEHAVIOR AS JSON continuations — it is **not directly reusable** for CaP
+   Python. Start with **γ-only (DFA-only) Ctrl-G** (no HMM). Adding a CaP-specific HMM is a
+   follow-up that requires sampling Llama 3.1 continuations on a CaP-format dataset
+   (`eai_train/cond_hmm/sample_llama31_vllm.py` adapted to CaP prompts) and retraining — not
+   in scope for the first pass.
+
+### Runtime switch: vLLM → HuggingFace transformers
+
+`eai_ctrlg/generate.py` and `generate_beta.py` run through `transformers.AutoModelForCausalLM`
+with a custom `LogitsProcessor`; they do **not** use vLLM. This means the vLLM server on
+`:8000` is **not usable** for the Ctrl-G pass. Two options:
+
+- **Option A (recommended):** Shut down the vLLM server and run generation through HF
+  `transformers` with the Ctrl-G logits processor on the freed GPU. Lowest memory, cleanest
+  code path. Prompt-engineering baselines (v0–v5) are already saved on disk so the vLLM
+  server is no longer needed.
+- **Option B:** Keep vLLM up for the unconstrained baseline and co-locate an HF Llama 3 8B
+  for Ctrl-G on the same GPU. Requires ~32–40 GB total (two bf16 copies of the 8B weights +
+  KV caches). Infeasible given current VRAM headroom (see assessment below).
+
+### Step 2c concrete workflow
+
+```bash
+# 0. Stop vLLM (Option A — frees ~40 GB of VRAM)
+#    (kill PID shown by `nvidia-smi --query-compute-apps=pid,process_name`)
+
+# 1. Author the two new DFAs (one-time code change — no HMM retraining needed)
+#    eai_ctrlg/ctrlg/dfa_cap.py              — CaPCodegenDFA (γ, token-level)
+#    eai_ctrlg/ctrlg/beta/cap_beta_world.py  — CaPBetaWorld  (β, scene-grounded)
+#    eai_ctrlg/ctrlg/beta/cap_beta_dfa.py    — CaPBetaDFA    (wraps the world for generate_beta.py)
+
+# 2. Add a thin CaP driver next to generate.py that wires the CaP DFA into Ctrl-G
+#    eai_ctrlg/generate_cap.py  (mirrors generate.py; reads demo/prompts_v1_context.jsonl)
+
+# 3. γ-only (DFA-only) run — the mandatory pass condition
+conda activate ctrlg
+cd /home/ubuntu/tianyi/EmbodiedAgents/eai_ctrlg
+python generate_cap.py \
+  --base_model meta-llama/Meta-Llama-3-8B-Instruct \
+  --prompts    /home/ubuntu/tianyi/EmbodiedAgents/CaP/demo/prompts_v1_context.jsonl \
+  --few_shot   /home/ubuntu/tianyi/EmbodiedAgents/CaP/cap/lmp/prompts/real/tabletop_ui_prompt.txt \
+  --run_type   dfa_only \
+  --gamma_scale 0.0 \
+  --temperature 0.0 \
+  --max_new_tokens 512 \
+  --output     /home/ubuntu/tianyi/EmbodiedAgents/CaP/demo/outputs_llama3_ctrlg_gamma.jsonl
+
+# 4. Full two-level Ctrl-G (γ + β; HMM off for this first pass)
+python generate_cap.py \
+  --base_model meta-llama/Meta-Llama-3-8B-Instruct \
+  --prompts    /home/ubuntu/tianyi/EmbodiedAgents/CaP/demo/prompts_v1_context.jsonl \
+  --few_shot   /home/ubuntu/tianyi/EmbodiedAgents/CaP/cap/lmp/prompts/real/tabletop_ui_prompt.txt \
+  --run_type   ctrlg \
+  --use_beta   true \
+  --gamma_scale 0.0 \
+  --temperature 0.0 \
+  --max_new_tokens 512 \
+  --output     /home/ubuntu/tianyi/EmbodiedAgents/CaP/demo/outputs_llama3_ctrlg_beta.jsonl
+
+# 5. Re-score with the existing evaluator (same rubric as v0–v5)
+conda run -n cap-vllm python /home/ubuntu/tianyi/EmbodiedAgents/CaP/offline/evaluate_outputs.py \
+  --outputs /home/ubuntu/tianyi/EmbodiedAgents/CaP/demo/outputs_llama3_ctrlg_beta.jsonl \
+  --output  /home/ubuntu/tianyi/EmbodiedAgents/CaP/demo/outputs_llama3_ctrlg_beta_evaluated.jsonl
+```
+
+**Pass condition for Step 2c:** `outputs_llama3_ctrlg_beta_evaluated.jsonl` reaches 45/45 on
+the existing rubric *and* shows non-trivial diversity (`parse_obj_name`/`parse_position`
+counts ≥ v5) *and* zero instances of source = destination.
+
+### Step 2c — Actual Results (2026-04-16)
+
+The initial implementation uses a **minimal two-level approach**: γ via vLLM
+logit_bias + stop strings (not a full token-level DFA), β via post-hoc
+rejection checks (not a real-time β DFA). This is `generate_cap.py` in
+`eai_ctrlg/`, run against all 45 CaP-compatible prompts.
+
+**Three-mode comparison** (retroactive γ+β applied to all modes for fair comparison):
+
+| Mode | PASS | Rate | vs. baseline | Key change |
+|------|------|------|-------------|-----------|
+| baseline | 35/45 | 78% | — | Raw LLM, no constraints |
+| γ-only | 38/45 | 84% | +3 | logit_bias bans goto_pos/stack; stop strings block say( |
+| γ+β (ctrlg) | 38/45 | 84% | +3 | γ decoding + β post-hoc detection (same code, more diagnostics) |
+
+**Important finding**: γ-only and ctrlg produce **byte-for-byte identical**
+generated code — β is purely post-hoc detection, not generation-time steering.
+Without β, the γ-only run reports 44/45 PASS (hiding 6 semantic bugs). With β,
+6 additional violations are flagged:
+
+| Failure category | Count | Caught by | Prompts |
+|-----------------|-------|-----------|---------|
+| β:identity_action (src == dst) | 4 | β only | c013, c021, c022, c023 |
+| β:offscene_destination | 2 | β only | c001, c010 |
+| γ:syntactically_valid (truncation) | 1 | γ | c015 |
+| γ:no_goto_pos (baseline only) | 5 | γ | c001, c031, c032, c037, c038 |
+
+**Pass condition assessment**: NOT MET.
+- 38/45 (not 45/45)
+- Remaining 7 failures are **prompt extraction bugs** (not model/Ctrl-G issues):
+  - 4 identity_action: single-carton context makes query ambiguous
+  - 2 offscene_destination: floor/room destination stripped during extraction
+  - 1 truncation: max_tokens too low for 7-object prompt
+- Full γ-DFA + β-DFA constrained decoding (as designed in the plan) is not
+  yet implemented — the current approach uses vLLM API-level constraints only
+
+**Detailed results**: `CaP/demo/ctrlg_run/RESULTS.md`
+**Output files**: `CaP/demo/ctrlg_run/outputs_llama3_{baseline,gamma,ctrlg}.jsonl`
+
+### Step 2c — Next steps
+
+1. **Fix prompt extraction bugs** (quick wins to reach 45/45):
+   - Add floor/room destinations to `context_objects` (fixes c001, c010)
+   - Preserve instance IDs for self-referential queries (fixes c013, c021-c023)
+   - Increase `max_tokens` to 768 for prompts with >5 objects (fixes c015)
+
+2. **Implement full γ-DFA** (`ctrlg/dfa_cap.py`): Token-level DFA over CaP
+   Python syntax would enforce valid code by construction, eliminating the
+   truncation failure (c015) and providing stronger guarantees than logit_bias.
+
+3. **Implement β-DFA for generation-time steering** (`ctrlg/beta/cap_beta_world.py`):
+   Would reject `src == dst` and offscene destinations *during* generation,
+   not just post-hoc — enabling the model to re-route to valid alternatives.
+
+---
+
+## Detailed v0 Failure Inventory (what Ctrl-G has to fix)
+
+Ground-truth inspection of `demo/outputs_llama3_v0_simple_error.jsonl` (not the v0 evaluator's
+self-report, which is too lax). The v0 rubric mis-labelled 41 rows as passing because its
+allowlist still admitted `goto_pos`. Under the stricter v5 allowlist (the one that reflects the
+real CaP runtime), v0 fails on **43/45 prompts**:
+
+### Category A — Non-CaP API calls (41/45 prompts)
+
+Every row whose `generated_code` leads with `goto_pos(` or `goto_pos(get_obj_pos(` or
+`goto_pos(parse_position(`. These do not resolve against `cap/lmp/lmp_wrapper.py::setup_LMP`
+and will raise `NameError` at runtime.
+
+Examples from v0:
+- `c001` "move the plywoods to the designated area" → `goto_pos(parse_position('the designated area'))`
+- `c002` "put all the books inside the carton" → `goto_pos(get_obj_pos('carton'))`
+- `c003` "arrange the objects next to the sink" → `goto_pos(parse_position('next to the sink'))`
+- `c004` "clear the table — put everything in the bucket" → `goto_pos(get_obj_pos('bucket'))`
+- `c005` "collect all the pops and put them in the bucket" → `goto_pos(get_obj_pos('bucket'))`
+- (37 more of the same shape)
+
+**What Ctrl-G enforces:** γ DFA's call-head allowlist does not contain `goto_pos`. At the
+token right after `(` at a statement start, the logits for `goto_pos`'s first subword are
+masked to `-inf`. The sampler is forced toward `put_first_on_second`, `parse_obj_name`, or
+`parse_position`.
+
+### Category B — Empty / truncated output (2/45 prompts)
+
+Hard failures the v0 evaluator caught:
+- `c016` "put all the backpacks into the mouse" → `generated_code: ""`
+- `c017` "put all the backpacks into the toothpaste" → `generated_code: ""`
+
+Both prompts describe a destination (`mouse`, `toothpaste`) that is semantically impossible
+as a container. The v0 model under-generates (returns nothing) rather than producing an
+incorrect program. v5 makes these pass by emitting literal `put_first_on_second('backpack',
+'mouse')`, which is arguably worse — it silently commits to a nonsensical action.
+
+**What Ctrl-G enforces:** β world model rejects any `dst` not in the scene's
+`get_obj_names()`. Ctrl-G is then free either to terminate the generation on a shorter valid
+program (e.g. `parse_obj_name('the backpacks', …)` followed by an EOS) or to fall back to
+the no-op branch if the β world has no goal-consistent action. Either outcome is auditable,
+unlike v5's silent-hallucination path.
+
+### Category C — Degenerate identity actions (4/45 prompts)
+
+The v5 evaluator counted these as passing, but they are runtime-unsafe:
+- `c013` "put all the cartons into the carton" → `put_first_on_second('carton', 'carton')`
+- `c021` same query, same output
+- `c022` same query, same output
+- `c023` same query, same output
+
+Calling `put_first_on_second(x, x)` picks up `x` and tries to place it on itself — the
+GraspGen + motion stack will at best loop indefinitely and at worst crash the XArm
+controller.
+
+**What Ctrl-G enforces:** β world's `apply(put_first_on_second, src, dst)` precondition
+rejects `src == dst`. γ-only Ctrl-G cannot detect this (it is a semantic, not syntactic,
+property); this is the clearest case where the β level is load-bearing.
+
+### Category D — Stop-boundary violations (1/45 prompts at v5)
+
+`c015` "put all the highlighters into the backpack" at v5 generates correct code but has
+`stops_correctly: false` — the model keeps emitting tokens past the logical end of the
+program. This is the sole v5 fail.
+
+**What Ctrl-G enforces:** γ DFA has an accept state that triggers EOS the moment the program
+is syntactically complete. The logits processor masks every non-EOS token at that state.
+
+### Summary table — v0 failure modes vs Ctrl-G mechanism
+
+| Category | Count (v0, strict) | Mechanism | Ctrl-G level | Fix level |
+|---|---:|---|---|---|
+| A — non-CaP API call (`goto_pos` etc.) | 41 | syntactic | γ DFA allowlist | hard |
+| B — empty / un-parseable | 2 | syntactic (no program) | γ DFA + EOS at valid accept | hard |
+| C — `src == dst` identity | 4 | semantic | β world precondition | hard |
+| D — run-past-stop | 1 | syntactic termination | γ DFA accept → EOS | hard |
+
+(Rows can overlap across categories; totals are not disjoint.)
+
+---
+
+## GPU Feasibility Assessment — Can Step 2c Start Now?
+
+**Snapshot (rechecked 2026-04-15, later):**
+
+```
+GPU 0  NVIDIA GH200 480GB   total 97871 MiB   used 57076 MiB   free 39693 MiB   util 36 %
+
+Compute apps on GPU 0:
+  PID 2950848  VLLM::EngineCore                                       40424 MiB   (11h48m)
+  PID 3398754  python clamp/bin/run_clamp_behavior.py --task behavior_sd
+               --backend llm --model dganochenko/llama-3-8b-chat ...  16638 MiB   (48m, live)
+```
+
+Since the previous check the device has freed up: one anonymous python process
+(PID 3247478, ~20 GB) has exited, utilisation dropped from 99 % → 36 %, and
+**free VRAM is now ~39.7 GB**. Of the two remaining jobs:
+
+- PID 2950848 `VLLM::EngineCore` — the CaP/Llama vLLM server. v0–v5 artifacts are
+  already persisted to disk (see `CaP/demo/*.jsonl`); the server has no live
+  dependency for Step 2c and can be stopped if more headroom is needed.
+- PID 3398754 `run_clamp_behavior.py --task behavior_sd --backend llm` — a CLAMP
+  BEHAVIOR-SD baseline generation, 48 min in, 100 prompts. **Load-bearing — do
+  not kill.**
+
+**Ctrl-G memory requirement** (HF `transformers` + custom `LogitsProcessor`, bf16 Llama 3 8B):
+
+- Weights: ~16 GB
+- KV cache @ 8192 ctx, batch=1: ~1–2 GB
+- DFA transition table + ConstraintLogitsProcessor buffers: ~0.5–2 GB (the GI DFA in
+  `eai_ctrlg` hit ~49 GB at depth=100 before the sparse-matrix fix — see `CLAUDE.md`.
+  A CaP γ DFA will be much smaller, likely tens of states — but verify before launching)
+- Total budget: **~20–22 GB** γ-only; a little more with β + HMM.
+
+**Verdict: Step 2c can start now, on the free 39.7 GB — no process needs to be killed.**
+The γ-only HF run fits comfortably; the γ+β run also fits with margin. Leave the CLAMP
+BEHAVIOR-SD job untouched. The only constraint is that Step 2c should run as a single
+process against GPU 0 and must not request more than the HF Ctrl-G budget.
+
+Recommended launch sequence:
+
+```bash
+# 1. Re-verify the headroom right before launching
+nvidia-smi --query-gpu=memory.free --format=csv,noheader
+#   Expected ≥ ~35 GB; if CLAMP or vLLM have grown since, reassess.
+
+# 2. Keep --gpu-memory-utilization / torch allocator conservative for the HF process
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256
+export CUDA_VISIBLE_DEVICES=0
+
+# 3. γ-only run (Step 2c §3)
+conda activate ctrlg
+cd /home/ubuntu/tianyi/EmbodiedAgents/eai_ctrlg
+python generate_cap.py --run_type dfa_only ...  # (full args in Step 2c §3)
+```
+
+**If future re-checks show < ~25 GB free** (e.g. another co-tenant starts), defer
+Step 2c or stop the vLLM server (PID 2950848) — but do not touch the CLAMP job.
+
+---
+
 ## Diagnosis & Fix Log — Generated Code Quality Issues
+
+> **Plan update (2026-04-15):** The v1–v5 fix versions below were prompt-engineering
+> iterations (adding/removing few-shot examples, tightening the system message). They
+> are **retained as reference only**. The current direction is to fix v0's failures
+> via **two-level constrained decoding** from `eai_ctrlg/` (γ token DFA + β meta DFA /
+> HMM) rather than more prompt tweaks. See the new section "**Step 2c — Two-Level
+> Ctrl-G Instead of Prompt Engineering**" below for the replacement approach,
+> detailed failure taxonomy, and GPU feasibility.
 
 **Baseline run** (`demo/outputs_llama3.jsonl`, 2026-04-15): All 45 outputs were degenerate —
 single `goto_pos()` calls instead of multi-step `put_first_on_second` loops.
@@ -463,6 +797,10 @@ Three successive fixes are applied, each producing a versioned prompt file and o
 | v3  | 45/45 | 3 | 0 | 4  | 3  | 45 | 0 | 0 | 1.2 |
 | v4  | 45/45 | 0 | 0 | 2  | 45 | 0  | 0 | 0 | 1.5 |
 | **v5**  | **44/45** | **1** | **1** | **8**  | **45** | **0**  | **0** | **0** | **1.4** |
+| **ctrlg** (γ+β) | **38/45**† | **0** | **1** | **5** | **44** | **0** | **0** | **0** | **1.4** |
+
+† ctrlg retroactive pass rate applies both γ and β checks; γ-only JSONL reports 44/45.
+  Code is byte-for-byte identical to v5 γ-only (β is post-hoc detection only).
 
 **v3 diagnosis (why adding BEHAVIOR examples hurts):** Inserting 7 new BEHAVIOR-domain examples (pick-place for-loops on household objects) — regardless of their position in the prompt — causes the Llama 3 8B model to generate `goto_pos(...)` for all 45 queries. Root cause: the 8B model cannot reliably context-switch between two very different object domains (colorful blocks/bowls vs. household items). The BEHAVIOR examples introduce ambiguity about which pattern to follow, and the model falls back to the simplest action it knows from the API header comments (`goto_pos`). The plain block/bowl examples (v2) already elicit correct `put_first_on_second` calls when the context objects are correctly grounded.
 
