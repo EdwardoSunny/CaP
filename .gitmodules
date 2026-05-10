@@ -1,0 +1,9 @@
+[submodule "GraspGen"]
+	path = GraspGen
+	url = https://github.com/NVlabs/GraspGen.git
+[submodule "cap/segment/segment-anything2"]
+	path = cap/segment/segment-anything2
+	url = https://github.com/facebookresearch/sam2.git
+[submodule "Fast-FoundationStereo"]
+	path = Fast-FoundationStereo
+	url = https://github.com/NVlabs/Fast-FoundationStereo.git

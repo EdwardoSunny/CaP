@@ -3,3 +3,18 @@ __pycache__/
 recordings/
 ckpt/
 *.ply
+
+# Local notes / docs that shouldn't ship with the repo
+CLAUDE.md
+
+# Large debug / output artifacts
+segmentation_debug_*.png
+output_ffs_test/
+shared_memory/
+
+# Per-task hardcoded plan files — physical-setup-specific tuning that
+# shouldn't live in the public repo. Parent directories (and their
+# README.md) stay tracked; the per-task subfolders do not.
+configs/hardcoded_traj/*/
+test_plans/*/
+demo_results/*/

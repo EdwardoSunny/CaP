@@ -27,8 +27,10 @@ from openai import OpenAI
 # Handle both package import and direct script execution
 try:
     from .camera_exposure_config import DEPTH_EXPOSURE, RGB_EXPOSURE
+    from . import ffs_backend as _ffs
 except ImportError:
     from camera_exposure_config import DEPTH_EXPOSURE, RGB_EXPOSURE
+    from cap import ffs_backend as _ffs
 
 # Add SAM2 to path
 sys.path.insert(
@@ -53,7 +55,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Default Molmo endpoint — override via MOLMO_BASE_URL env var
-MOLMO_BASE_URL = os.environ.get("MOLMO_BASE_URL", "http://scai4.cs.ucla.edu:8001/v1")
+MOLMO_BASE_URL = os.environ.get("MOLMO_BASE_URL", "http://uril-1.cs.ucla.edu:8000/v1")
 MOLMO_MODEL = os.environ.get("MOLMO_MODEL", "allenai/Molmo2-8B")
 
 
@@ -145,7 +147,7 @@ def query_molmo_for_points(
     text_prompt: str,
     base_url: str = MOLMO_BASE_URL,
     model: str = MOLMO_MODEL,
-    n_calls: int = 6,
+    n_calls: int = 12,
 ) -> list[tuple[float, float]]:
     """Ask Molmo to point at *text_prompt* in *image_rgb*.
 
@@ -228,6 +230,11 @@ class RobotFrameMerger:
         self.sam_mask_generator = sam_mask_generator
         self.device = device
 
+        # Fast-FoundationStereo replaces the on-device active-stereo depth.
+        # The engine lazily loads the model on first call and is shared across
+        # all cameras.
+        self.ffs_engine = _ffs.FFSDepthEngine()
+
         # Load calibration transforms
         calib_path = str(calib_file)  # Handle both str and Path objects
         if not os.path.exists(calib_path):
@@ -241,13 +248,20 @@ class RobotFrameMerger:
             self._init_camera(serial)
 
     def _init_camera(self, serial_number):
-        """Initialize a RealSense camera with auto defaults"""
+        """Initialize a RealSense camera with IR pair + color streams.
+
+        FFS needs a rectified IR1/IR2 pair and a color image. Active depth is
+        not required (FFS replaces it) but we still leave the streams open in
+        case downstream code wants to fall back.
+        """
         pipeline = rs.pipeline()
         config = rs.config()
 
         config.enable_device(serial_number)
         config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
         config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+        config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, 30)
+        config.enable_stream(rs.stream.infrared, 2, 640, 480, rs.format.y8, 30)
 
         profile = pipeline.start(config)
 
@@ -267,9 +281,25 @@ class RobotFrameMerger:
             rs.hole_filling_filter(),
         ]
 
-        self.cameras[serial_number] = {"pipeline": pipeline, "filters": filters, "align": align}
+        # Stash depth-sensor handle + intrinsics/extrinsics for the FFS path.
+        depth_sensor = profile.get_device().first_depth_sensor()
+        ir1_p = profile.get_stream(rs.stream.infrared, 1).as_video_stream_profile()
+        ir2_p = profile.get_stream(rs.stream.infrared, 2).as_video_stream_profile()
+        col_p = profile.get_stream(rs.stream.color).as_video_stream_profile()
 
-        print(f"Camera {serial_number} initialized")
+        self.cameras[serial_number] = {
+            "pipeline": pipeline,
+            "filters": filters,
+            "align": align,
+            "profile": profile,
+            "depth_sensor": depth_sensor,
+            "intr_ir": ir1_p.get_intrinsics(),
+            "intr_col": col_p.get_intrinsics(),
+            "ext_ir1_ir2": ir1_p.get_extrinsics_to(ir2_p),
+            "ext_ir1_col": ir1_p.get_extrinsics_to(col_p),
+        }
+
+        print(f"Camera {serial_number} initialized (FFS-ready)")
 
     def _configure_camera(self, pipeline):
         """Configure camera with simple auto defaults - no JSON, no config files"""
@@ -322,43 +352,35 @@ class RobotFrameMerger:
         """
         camera_data = self.cameras[serial]
         pipeline = camera_data["pipeline"]
-        filters = camera_data["filters"]
-        align = camera_data["align"]
+        depth_sensor = camera_data["depth_sensor"]
 
-        # Capture frame and align depth to color (matches calibration)
-        frames = pipeline.wait_for_frames()
-        frames = align.process(frames)
-        depth_frame = frames.get_depth_frame()
-        color_frame = frames.get_color_frame()
-
-        if not depth_frame or not color_frame:
-            logger.warning(f"Failed to capture from camera {serial}")
+        # Snapshot IR1/IR2/color with the IR projector OFF — FFS is a passive
+        # matcher and the dot pattern would corrupt feature matching.
+        try:
+            ffs_inputs = _ffs.capture_emitter_off(pipeline, depth_sensor,
+                                                 warmup=15)
+        except RuntimeError as err:
+            logger.warning(f"Failed to capture from camera {serial}: {err}")
             return None
+        color_image = ffs_inputs["color"]
+        h, w = color_image.shape[:2]
 
-        # Apply filters
-        for filter in filters:
-            depth_frame = filter.process(depth_frame)
-
-        color_image = np.asanyarray(color_frame.get_data())
-
-        # Create point cloud (same as robot_calib)
-        raw_pcd = rs.pointcloud()
-        raw_pcd.map_to(color_frame)
-        points = raw_pcd.calculate(depth_frame)
-
-        # Extract points and colors (same as robot_calib)
-        points_3d = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3)
-        tex = (
-            np.asanyarray(points.get_texture_coordinates())
-            .view(np.float32)
-            .reshape(-1, 2)
+        # Run FFS on the IR pair, then forward-project the IR1-frame depth
+        # into the color camera so the (points_3d, colors) layout matches the
+        # original rs.pointcloud()-based output: one point per color pixel,
+        # in the COLOR camera frame, with a corresponding (u, v) per point.
+        points_3d, colors, depth_color, _disp = _ffs.points_and_colors_from_ir(
+            ffs_inputs["ir1"], ffs_inputs["ir2"], color_image,
+            camera_data["intr_ir"], camera_data["intr_col"],
+            camera_data["ext_ir1_ir2"], camera_data["ext_ir1_col"],
+            self.ffs_engine, zfar=self.max_depth,
         )
 
-        # Get colors
-        h, w = color_image.shape[:2]
-        u = np.clip((tex[:, 0] * w).astype(np.int32), 0, w - 1)
-        v = np.clip((tex[:, 1] * h).astype(np.int32), 0, h - 1)
-        colors = color_image[v, u][:, ::-1] / 255.0  # BGR to RGB
+        # Per-point (u, v) into the color image — equivalent to the texture
+        # coords the rs.pointcloud() flow produced.
+        uu, vv = np.meshgrid(np.arange(w), np.arange(h))
+        u = uu.reshape(-1)
+        v = vv.reshape(-1)
 
         # Filter valid points (same as robot_calib)
         valid_mask = (
@@ -400,7 +422,11 @@ class RobotFrameMerger:
                 pixel_points = molmo_points_to_pixel(molmo_pts, w, h)
                 logger.info(f"  Molmo returned {len(pixel_points)} points, voting across {len(all_masks)} masks...")
 
-                # Vote: pick the mask that contains the most Molmo points
+                # Vote: count Molmo points in each mask, then pick the tightest
+                # (smallest area) among masks with the most points. SAM often
+                # emits nested masks — a larger encompassing mask can share the
+                # exact same Molmo point count as the tight object mask, so
+                # ranking by points alone is ambiguous.
                 px_int = pixel_points.astype(int)
                 px_x = np.clip(px_int[:, 0], 0, w - 1)
                 px_y = np.clip(px_int[:, 1], 0, h - 1)
@@ -412,12 +438,35 @@ class RobotFrameMerger:
                     point_counts.append(count)
                 point_counts = np.array(point_counts)
 
-                best_mask_idx = int(np.argmax(point_counts))
+                # Candidate pool: masks whose point count is within `top_ratio`
+                # of the max. Tolerates small point-distribution variance.
+                top_ratio = 0.85
+                max_count = int(point_counts.max())
+                threshold = max(1, int(np.ceil(max_count * top_ratio)))
+                candidate_idx = np.where(point_counts >= threshold)[0]
+
+                areas = np.array([int(all_masks[i].sum()) for i in candidate_idx])
+                # Break ties: smallest area within the candidate pool.
+                best_in_pool = int(np.argmin(areas))
+                best_mask_idx = int(candidate_idx[best_in_pool])
                 target_mask = all_masks[best_mask_idx]
-                logger.info(f"  Selected mask #{best_mask_idx}/{len(all_masks)} "
-                             f"({point_counts[best_mask_idx]}/{len(pixel_points)} Molmo pts, "
-                             f"iou={all_scores[best_mask_idx]:.3f}, "
-                             f"area={sam_results[best_mask_idx]['area']}px)")
+
+                logger.info(
+                    f"  Candidates ({len(candidate_idx)} masks with "
+                    f">={threshold}/{len(pixel_points)} Molmo pts, max={max_count}):"
+                )
+                for ci, area in zip(candidate_idx, areas):
+                    marker = " ←" if ci == best_mask_idx else ""
+                    logger.info(
+                        f"    mask #{ci}: pts={point_counts[ci]}, area={area}px, "
+                        f"iou={all_scores[ci]:.3f}{marker}"
+                    )
+                logger.info(
+                    f"  Selected mask #{best_mask_idx}/{len(all_masks)} "
+                    f"({point_counts[best_mask_idx]}/{len(pixel_points)} Molmo pts, "
+                    f"iou={all_scores[best_mask_idx]:.3f}, "
+                    f"area={sam_results[best_mask_idx]['area']}px)"
+                )
 
             # --- Debug visualisation ---
             self._show_segmentation_debug(
@@ -543,13 +592,17 @@ class RobotFrameMerger:
             _cv2.imwrite(out_path, combined)
             logger.info(f"  Debug viz saved to {out_path}")
 
-            # Interactive window disabled — PNG backup is saved above.
-            # To re-enable: uncomment the lines below.
-            # window_name = f"Segmentation - Camera {serial} - Press any key"
-            # _cv2.imshow(window_name, combined)
-            # logger.info(f"  Showing segmentation debug for camera {serial}. Press any key to continue...")
-            # _cv2.waitKey(0)
-            # _cv2.destroyWindow(window_name)
+            # Interactive window — shown when ENABLE_GRASP_VIZ=1 is set.
+            # PNG backup is always saved above regardless.
+            if os.environ.get("ENABLE_GRASP_VIZ"):
+                window_name = f"Segmentation - Camera {serial} - Press any key"
+                _cv2.imshow(window_name, combined)
+                logger.info(
+                    f"  Showing segmentation debug for camera {serial}. "
+                    "Press any key to continue..."
+                )
+                _cv2.waitKey(0)
+                _cv2.destroyWindow(window_name)
         except Exception as viz_e:
             logger.warning(f"  Could not show segmentation visualization: {viz_e}")
 

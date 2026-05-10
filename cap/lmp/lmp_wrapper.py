@@ -369,12 +369,20 @@ class LMPWrapper:
 
             logger.info(f"Pick: {pick_pos_xyz}  (approach offset {approach_offset} mm)")
 
+            # Approach above pick target
             self.goto_pos(approach_pick, duration=3.0, stage_val=stage_val)
+            # Explicit: open gripper
             self.open_gripper(stage_val)
             time.sleep(0.5)
+            # Explicit: descend to pick pose
             self.goto_pos(pick_pos, duration=2.0, stage_val=stage_val)
+            # Explicit: close gripper. The xarm controller process uses
+            # wait=True for set_gripper_position, so this blocks until the
+            # gripper hardware has physically reached the closed position
+            # before any subsequent motion command can be processed.
             self.close_gripper(stage_val)
             time.sleep(1.0)
+            # Explicit: lift back to approach height
             self.goto_pos(approach_pick, duration=2.0, stage_val=stage_val)
 
             logger.info("Pick completed successfully")
@@ -384,43 +392,59 @@ class LMPWrapper:
             logger.error(f"Pick failed: {e}")
             return False
 
-    def pick_place(
-        self, pick_pos, place_pos,
-        approach_offset=100.0, place_offset=50.0,
-        stage_val=0,
-    ):
-        """Execute pick and place operation.
+    def place(self, place_pos, approach_offset=100.0, place_offset=50.0, stage_val=0):
+        """Place a held object at place_pos: approach from above, descend to release height, open, retreat.
+
+        Assumes the gripper is already holding an object — only opens the gripper at the place height.
 
         Args:
-            pick_pos: Pick target — [x,y,z], [x,y,z,r,p,y], or [x,y] (mm/deg).
-            place_pos: Place target — same formats as pick_pos.
+            place_pos: Place target — [x,y,z], [x,y,z,r,p,y], or [x,y] (mm/deg).
             approach_offset: How far above the target (mm) to approach from.
-            place_offset: How far above the place target (mm) to release.
+            place_offset: How far above the place target (mm) the gripper opens.
             stage_val: Stage value for action recording.
         """
         try:
-            if not self.pick(pick_pos, approach_offset=approach_offset, stage_val=stage_val):
-                return False
-
             place_pos_xyz = np.array(place_pos[:3], dtype=np.float64)
             approach_place = np.array([place_pos_xyz[0], place_pos_xyz[1], place_pos_xyz[2] + approach_offset])
+            place_above = np.array([place_pos_xyz[0], place_pos_xyz[1], place_pos_xyz[2] + place_offset])
 
-            logger.info(f"Place: {place_pos_xyz}  (place offset {place_offset} mm)")
+            logger.info(f"Place: {place_pos_xyz}  (approach {approach_offset} mm, release {place_offset} mm)")
 
             self.goto_pos(approach_place, duration=3.0, stage_val=stage_val)
-            # Place above the target to avoid pressing into the table
-            place_above = np.array([place_pos_xyz[0], place_pos_xyz[1], place_pos_xyz[2] + place_offset])
             self.goto_pos(place_above, duration=2.0, stage_val=stage_val)
             self.open_gripper(stage_val)
             time.sleep(0.5)
             self.goto_pos(approach_place, duration=2.0, stage_val=stage_val)
 
-            logger.info("Pick and place completed successfully")
+            logger.info("Place completed successfully")
             return True
 
         except Exception as e:
-            logger.error(f"Pick and place failed: {e}")
+            logger.error(f"Place failed: {e}")
             return False
+
+    def pick_place(
+        self, pick_pos, place_pos,
+        approach_offset=100.0, place_offset=50.0,
+        stage_val=0,
+    ):
+        """Execute pick and place operation as `pick` then `place`.
+
+        Args:
+            pick_pos: Pick target — [x,y,z], [x,y,z,r,p,y], or [x,y] (mm/deg).
+            place_pos: Place target — same formats as pick_pos.
+            approach_offset: How far above the target (mm) to approach from.
+            place_offset: How far above the place target (mm) the gripper opens.
+            stage_val: Stage value for action recording.
+        """
+        if not self.pick(pick_pos, approach_offset=approach_offset, stage_val=stage_val):
+            return False
+        return self.place(
+            place_pos,
+            approach_offset=approach_offset,
+            place_offset=place_offset,
+            stage_val=stage_val,
+        )
 
     def follow_traj(self, trajectory, duration_per_point=1.0, stage_val=0):
         """Follow a trajectory of positions."""
@@ -553,7 +577,7 @@ class LMPWrapper:
 # Factory function — wires everything together
 # ---------------------------------------------------------------------------
 
-def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, vllm_host=None, max_tokens=None, context_window=None, plan_mode="python", hardcoded_traj_dir=None):
+def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, vllm_host=None, max_tokens=None, context_window=None, plan_mode="python", hardcoded_traj_dir=None, camera_serials=None):
     """
     Setup the full LMP system.
 
@@ -599,7 +623,7 @@ def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, v
 
     # --- 2. Perception (Molmo + SAM2) ---
     perception = SAMMolmoPerception(
-        camera_serials=["327122079374", "317222072157"],
+        camera_serials=camera_serials if camera_serials is not None else ["327122079374", "317222072157"],
         calib_file=str(project_root / "transforms" / "transforms.npy"),
         sam2_checkpoint=str(project_root / "ckpt" / "sam2.1_hiera_large.pt"),
         sam2_config="sam2.1/sam2.1_hiera_l",
@@ -658,6 +682,7 @@ def setup_LMP(config, env, xarm_config, grasp_strategy="graspgen", model=None, v
         "move_up": LMP_env.move_up,
         "move_down": LMP_env.move_down,
         "pick": LMP_env.pick,
+        "place": LMP_env.place,
         "pick_place": LMP_env.pick_place,
         "follow_traj": LMP_env.follow_traj,
         "wait": LMP_env.wait,

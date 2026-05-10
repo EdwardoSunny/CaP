@@ -42,6 +42,15 @@ SWITCHOFF:
   method: switch_off
   args: [name, id]
 
+# BEHAVIOR-style aliases (same as SWITCHON / SWITCHOFF).
+TOGGLE_ON:
+  method: switch_on
+  args: [name, id]
+
+TOGGLE_OFF:
+  method: switch_off
+  args: [name, id]
+
 LOOKAT:
   method: look_at
   args: [name, id]
@@ -53,3 +62,18 @@ TOUCH:
 SAY:
   method: say
   args: [message]
+
+# Compound actions: perception locates the target (`name`), the adapter moves
+# above it, then plays a hardcoded motion file (<method>_motion.txt) from the
+# task's traj_dir. The currently held object is implicit (set by preceding GRAB).
+SPRAY:
+  method: spray
+  args: [name, id]
+
+SOAK:
+  method: soak
+  args: [name, id]
+
+CLEAN:
+  method: clean
+  args: [name, id]

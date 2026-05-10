@@ -16,7 +16,8 @@ import pathlib
 import time
 from multiprocessing.managers import SharedMemoryManager
 
-# Toggle on if you want point-cloud / mask / grasp visualization
+# Visualizations disabled. To re-enable: uncomment below or run with
+# `ENABLE_GRASP_VIZ=1 uv run python test_full_plan.py ...`.
 # os.environ["ENABLE_GRASP_VIZ"] = "1"
 
 from cap.lmp.json_dispatcher import run_json_plan
@@ -29,13 +30,46 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _infer_traj_dir(plan_path: str) -> str:
+    """Auto-pick a per-task hardcoded-traj directory based on the plan file's
+    parent folder name. e.g. test_plans/dishwasher/foo.json →
+    configs/hardcoded_traj/dishwasher (if it exists).
+    """
+    task_name = pathlib.Path(plan_path).parent.name
+    candidate = pathlib.Path("configs/hardcoded_traj") / task_name
+    if candidate.is_dir():
+        return str(candidate)
+    return "configs/hardcoded_traj"
+
+
+def _read_camera_serials(traj_dir: str):
+    """Optional override of perception camera_serials, read from the task's
+    overrides.yaml. Returns a list[str] or None if not set."""
+    import yaml
+    path = pathlib.Path(traj_dir) / "overrides.yaml"
+    if not path.is_file():
+        return None
+    with path.open() as f:
+        data = yaml.safe_load(f) or {}
+    serials = data.get("camera_serials")
+    if serials is None:
+        return None
+    return [str(s) for s in serials]
+
+
 def main(
     plan_path: str,
     grasp_strategy: str = "hardcode",
-    hardcoded_traj_dir: str = "configs/hardcoded_traj",
+    hardcoded_traj_dir: str = None,
     record_res: tuple = (1280, 720),
     frequency: int = 30,
 ):
+    if hardcoded_traj_dir is None:
+        hardcoded_traj_dir = _infer_traj_dir(plan_path)
+        logger.info(f"Auto-selected traj dir: {hardcoded_traj_dir}")
+    camera_serials = _read_camera_serials(hardcoded_traj_dir)
+    if camera_serials is not None:
+        logger.info(f"Per-task camera_serials override: {camera_serials}")
     xarm_config = XArmConfig()
     output_dir = pathlib.Path("./recordings")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -69,6 +103,7 @@ def main(
                 grasp_strategy=grasp_strategy,
                 plan_mode="json",
                 hardcoded_traj_dir=hardcoded_traj_dir,
+                camera_serials=camera_serials,
             )
 
             # setup_LMP wired the adapter + action_map onto the LMP's cfg.
@@ -98,8 +133,9 @@ if __name__ == "__main__":
     parser.add_argument("--grasp", default="hardcode",
                         choices=["hardcode", "graspgen"],
                         help="Grasp strategy. 'hardcode' avoids GraspGen checkpoint load.")
-    parser.add_argument("--traj-dir", default="configs/hardcoded_traj",
-                        help="Directory with hardcoded trajectory .txt files.")
+    parser.add_argument("--traj-dir", default=None,
+                        help="Directory with hardcoded trajectory .txt files. "
+                             "Default: auto-pick configs/hardcoded_traj/<task>/ from plan path.")
     args = parser.parse_args()
     main(
         plan_path=args.plan,

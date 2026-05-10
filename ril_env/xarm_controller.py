@@ -402,6 +402,22 @@ class XArmController(mp.Process):
 
         self.input_queue.put(cmd)
 
+    def home(self):
+        """Queue a HOME command. The run loop will switch to joint-mode,
+        open the gripper, drive to self.home_pos via set_servo_angle(wait=True),
+        switch back to servo-mode. Returns immediately — caller should sleep
+        long enough for the joint motion to finish."""
+        assert self.is_alive()
+        cmd = {
+            "cmd": Command.HOME.value,
+            # Filler fields so the queue's structured layout stays consistent.
+            "target_pose": np.zeros(6, dtype=np.float64),
+            "grasp": 0.0,
+            "duration": 0.0,
+            "target_time": time.time(),
+        }
+        self.input_queue.put(cmd)
+
     def run(self):
         try:
             logger.info(f"[XArmController] Connecting to xArm at {self.robot_ip}")
@@ -459,16 +475,15 @@ class XArmController(mp.Process):
                         self.last_target_pose = target_pose
                         logger.debug(f"[XArmController] New target pose: {target_pose}")
                     elif cmd == Command.HOME.value:
-                        # Currently, there are some issues here. It is best to move closer
-                        # to home before homing, otherwise it is *very* dangerous.
-                        logger.info("[XArmController] Received HOME command.")
+                        # Mid-task HOME — joint motion only, gripper state is
+                        # NOT touched. This preserves whatever the gripper is
+                        # holding through the home transit, and keeps the
+                        # `previous_grasp` cache in sync with hardware.
+                        # (home.py uses the legacy XArm class which has its
+                        #  own home() that does open the gripper for resets.)
+                        logger.info("[XArmController] Received HOME command (gripper state preserved).")
                         arm.set_mode(0)
                         arm.set_state(0)
-                        code = arm.set_gripper_position(850, wait=False)
-                        if code != 0:
-                            logger.error(
-                                f"Error in set_gripper_position (HOME open): {code}"
-                            )
                         code = arm.set_servo_angle(
                             angle=self.home_pos, speed=self.home_speed, wait=True
                         )
@@ -485,10 +500,16 @@ class XArmController(mp.Process):
                     list(self.last_target_pose), is_radian=False
                 )
 
-                # Update gripper.
+                # Update gripper. wait=True blocks the controller process
+                # until the gripper has physically reached the target — this
+                # is what guarantees the close finishes BEFORE the next
+                # motion command (lift) can be processed by the run loop.
+                # With wait=False, the gripper command is fire-and-forget
+                # and can actuate during the lift trajectory.
                 if grasp != self.previous_grasp:
                     if grasp == 1.0:
-                        code = arm.set_gripper_position(0, wait=False)
+                        logger.info(f"[XArm gripper] grasp {self.previous_grasp:.1f}→{grasp:.1f}, sending CLOSE (wait=True)")
+                        code = arm.set_gripper_position(0, wait=True)
                         if code != 0:
                             logger.error(
                                 f"Error in set_gripper_position (close): {code}"
@@ -497,7 +518,8 @@ class XArmController(mp.Process):
                                 f"Error in set_gripper_position (close): {code}"
                             )
                     else:
-                        code = arm.set_gripper_position(850, wait=False)
+                        logger.info(f"[XArm gripper] grasp {self.previous_grasp:.1f}→{grasp:.1f}, sending OPEN (wait=True)")
+                        code = arm.set_gripper_position(850, wait=True)
                         if code != 0:
                             logger.error(
                                 f"Error in set_gripper_position (open): {code}"
@@ -506,6 +528,7 @@ class XArmController(mp.Process):
                                 f"Error in set_gripper_position (open): {code}"
                             )
                     self.previous_grasp = grasp
+                    logger.info(f"[XArm gripper] hardware confirmed grasp={grasp:.1f}")
 
                 if code != 0:
                     logger.error(f"[XArmController] set_servo_cartesian error: {code}")
